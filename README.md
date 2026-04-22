@@ -24,10 +24,12 @@ This repository aims to package the work of Alex Samorukov and Botify Labs on ma
 
 ### Use a prebuilt container
 1. Download your AWS VPN client profile into a directory
-2. Run `docker run --name vpn -d --net host -v /path/to/profile.ovpn:/opt/openvpn/profile.ovpn:ro --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN kpalang/aws-vpn:latest`
+2. Run `docker run --name vpn -d --net host -v /path/to/profile.ovpn:/opt/openvpn/profile.ovpn:ro --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN ghcr.io/dangh/aws-vpn-client-docker:latest`
    1. Run `docker logs -f vpn` to grab the login link
    2. After logging in, you can safely exit the log tail with `Ctrl-C`
 3. Enjoy
+
+If you are using a fork, the image path will be `ghcr.io/<owner>/aws-vpn-client-docker:<tag>`.
 
 ### Build the container yourself
 1. Clone this repository
@@ -37,3 +39,13 @@ This repository aims to package the work of Alex Samorukov and Botify Labs on ma
 4. Run `docker compose up --build`
    1. Also grab the login link from `docker compose logs`
 6. Enjoy
+
+### Multi-arch publishing
+GitHub Actions publishes a multi-platform image from `.github/workflows/docker-publish.yml`.
+
+On pushes to `master` and version tags, the workflow builds and publishes:
+
+- `linux/amd64`
+- `linux/arm64`
+
+The workflow publishes to `ghcr.io/${{ github.repository }}`. A push to `master` publishes the `:master` image tag. A push of a Git tag like `v1.2.3` publishes both `:v1.2.3` and `:latest`. Pull requests run the same multi-arch build without pushing.
