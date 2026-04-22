@@ -10,7 +10,7 @@ RUN apk add --no-cache curl tar libcap-ng-dev linux-headers linux-pam-dev lz4-de
 RUN curl --fail -L -o openvpn.tar.gz "https://github.com/OpenVPN/openvpn/releases/download/v$OPENVPN_VERSION/openvpn-$OPENVPN_VERSION.tar.gz" \
     && tar xzf openvpn.tar.gz \
     && cd "openvpn-$OPENVPN_VERSION" \
-    && curl --fail -o openvpn-aws.patch "https://raw.githubusercontent.com/botify-labs/aws-vpn-client/refs/heads/master/patches/openvpn-v$OPENVPN_VERSION-aws.patch" \
+    && curl --fail -o openvpn-aws.patch "https://raw.githubusercontent.com/dangh/aws-vpn-client/refs/heads/master/openvpn-v$OPENVPN_VERSION-aws.patch" \
     && patch -p1 < "openvpn-aws.patch" \
     && ./configure --with-crypto-library=openssl \
     && make -j8 \
