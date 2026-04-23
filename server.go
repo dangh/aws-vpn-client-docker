@@ -14,16 +14,15 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-	"sync"
 )
 
 const port = "35001"
+const statusFile = "/tmp/vpn-status"
 
 var (
-	mu         sync.Mutex
-	vpnSID     string
-	vpn        *vpnState
-	connStatus = "idle" // idle | connecting | connected | disconnected
+	vpnSID    string
+	vpn       *vpnState
+	activeCmd *exec.Cmd
 )
 
 type vpnState struct {
@@ -53,7 +52,7 @@ const indexHTML = `<!DOCTYPE html>
 </head>
 <body>
   <h2>AWS VPN</h2>
-  <div id="status" class="idle">idle</div>
+  <div id="status" class="%s">%s</div>
   <form method="POST" action="/upload" enctype="multipart/form-data">
     <label>Select .ovpn file to connect</label>
     <input type="file" name="ovpn" accept=".ovpn" onchange="this.form.submit()">
@@ -68,6 +67,20 @@ const indexHTML = `<!DOCTYPE html>
   </script>
 </body>
 </html>`
+
+func writeStatus(s string) {
+	if err := os.WriteFile(statusFile, []byte(s), 0644); err != nil {
+		log.Printf("writeStatus: %v", err)
+	}
+}
+
+func readStatus() string {
+	b, err := os.ReadFile(statusFile)
+	if err != nil {
+		return "idle"
+	}
+	return strings.TrimSpace(string(b))
+}
 
 func processOVPN(data []byte) (*vpnState, error) {
 	var vpnHost, vpnPort, vpnProto string
@@ -165,12 +178,6 @@ func getAuthURL(v *vpnState) (authURL, sid string, err error) {
 	return
 }
 
-func setStatus(s string) {
-	mu.Lock()
-	connStatus = s
-	mu.Unlock()
-}
-
 func connectVPN(v *vpnState, sid, encodedSAML string) {
 	cmd := exec.Command("/usr/sbin/openvpn",
 		"--config", v.confPath,
@@ -178,7 +185,8 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 		"--proto", v.proto, "--remote", v.srv, v.port,
 		"--script-security", "2",
 		"--up", "/etc/openvpn/up.sh",
-		"--route-up", "/etc/openvpn/notify-up.sh",
+		"--route-up", "/etc/openvpn/route-up.sh",
+		"--route-pre-down", "/etc/openvpn/route-pre-down.sh",
 		"--down", "/etc/openvpn/down.sh",
 		"--fast-io",
 		"--auth-user-pass", "/dev/stdin",
@@ -186,27 +194,20 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 	cmd.Stdin = strings.NewReader(fmt.Sprintf("N/A\nCRV1::%s::%s\n", sid, encodedSAML))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	activeCmd = cmd
 	if err := cmd.Run(); err != nil {
 		log.Printf("openvpn exited: %v", err)
 	}
-	setStatus("disconnected") // fallback if down.sh didn't fire
+	activeCmd = nil
+	writeStatus("disconnected") // fallback if route-pre-down.sh didn't fire
 }
 
 func main() {
-	http.HandleFunc("/vpn-event", func(w http.ResponseWriter, r *http.Request) {
-		s := r.URL.Query().Get("status")
-		if s == "connected" || s == "disconnected" {
-			setStatus(s)
-			log.Printf("VPN status: %s", s)
-		}
-	})
+	writeStatus("idle")
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		s := connStatus
-		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":%q}`, s)
+		fmt.Fprintf(w, `{"status":%q}`, readStatus())
 	})
 
 	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
@@ -237,12 +238,15 @@ func main() {
 			return
 		}
 
-		mu.Lock()
 		if vpn != nil {
 			os.Remove(vpn.confPath)
 		}
 		vpn = state
-		mu.Unlock()
+
+		if activeCmd != nil && activeCmd.Process != nil {
+			log.Printf("Killing existing VPN connection for new profile")
+			activeCmd.Process.Kill()
+		}
 
 		log.Printf("Config uploaded, resolved server %s:%s (%s)", state.srv, state.port, state.proto)
 
@@ -253,9 +257,7 @@ func main() {
 			return
 		}
 
-		mu.Lock()
 		vpnSID = sid
-		mu.Unlock()
 
 		log.Printf("Redirecting to auth URL")
 		http.Redirect(w, r, authURL, http.StatusFound)
@@ -272,22 +274,18 @@ func main() {
 				log.Printf("SAMLResponse field is empty or not exists")
 				return
 			}
-			mu.Lock()
-			sid := vpnSID
-			v := vpn
-			mu.Unlock()
 			encoded := url.QueryEscape(samlResponse)
-			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprintf(w, "Connecting to VPN...<script>window.close()</script>")
 			log.Printf("Received SAML response, launching VPN connection.")
-			if v != nil {
-				setStatus("connecting")
-				go connectVPN(v, sid, encoded)
+			if vpn != nil {
+				writeStatus("connecting")
+				go connectVPN(vpn, vpnSID, encoded)
 			}
+			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, indexHTML)
+		s := readStatus()
+		fmt.Fprintf(w, indexHTML, s, s)
 	})
 
 	log.Printf("Listening at http://localhost:%s", port)
