@@ -12,9 +12,9 @@ RUN curl --fail -L -o openvpn.tar.gz "https://github.com/OpenVPN/openvpn/release
     && cd "openvpn-$OPENVPN_VERSION" \
     && curl --fail -o openvpn-aws.patch "https://raw.githubusercontent.com/dangh/aws-vpn-client/refs/heads/master/openvpn-v$OPENVPN_VERSION-aws.patch" \
     && patch -p1 < "openvpn-aws.patch" \
-    && ./configure --with-crypto-library=openssl \
+    && ./configure --prefix=/usr --sysconfdir=/etc --sbindir=/usr/sbin --libdir=/usr/lib --with-crypto-library=openssl \
     && make -j"$(getconf _NPROCESSORS_ONLN)" \
-    && cp "/opt/openvpn/openvpn-$OPENVPN_VERSION/src/openvpn/openvpn" /opt/openvpn/openvpn-bin
+    && make DESTDIR=/opt/openvpn/install-root install
 
 FROM --platform=$BUILDPLATFORM golang:1.23.1-alpine3.20 AS server-builder
 
@@ -33,10 +33,10 @@ FROM alpine:3.20.3 AS container
 
 WORKDIR /opt/openvpn
 
-RUN apk add --no-cache bash busybox-binsh iproute2-minimal libcap-ng libcrypto3 libssl3 lz4-libs lzo musl libnl3 openssl bind-tools
+RUN apk add --no-cache bash busybox-binsh openvpn libnl3 openssl bind-tools
 
-COPY --from=ovpn-builder /opt/openvpn/openvpn-bin .
-COPY --from=server-builder /opt/go-server/server ./go_server
+COPY --from=ovpn-builder /opt/openvpn/install-root/ /
+COPY --from=server-builder /opt/go-server/server /usr/sbin/saml_server
 COPY entrypoint.sh .
 
 ENTRYPOINT ["./entrypoint.sh"]

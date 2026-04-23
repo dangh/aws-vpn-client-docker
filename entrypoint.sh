@@ -13,7 +13,7 @@ SRV=$(dig a +short "${RAND}.${VPN_HOST}" | head -n1)
 sed -i -E 's/remote .*//g' "$OVPN_CONF"
 
 echo "Getting SAML redirect URL from the AUTH_FAILED response (host: ${SRV}:${PORT})"
-OVPN_OUT=$(./openvpn-bin --config "$OVPN_CONF" --verb 3 \
+OVPN_OUT=$(/usr/sbin/openvpn --config "$OVPN_CONF" --verb 3 \
      --proto "${PROTO:-tcp}" --remote "$SRV" "$PORT" \
      --auth-user-pass <( printf "%s\n%s\n" "N/A" "ACS::35001" ) | grep AUTH_FAILED,CRV1)
 
@@ -27,16 +27,19 @@ echo "$URL"
 echo
 echo
 
-./go_server
+/usr/sbin/saml_server
 
 # get SID from the reply
 VPN_SID=$(echo "$OVPN_OUT" | awk -F : '{print $7}')
 
 # Finally OpenVPN with a SAML response we got
 # Delete saml-response.txt after connect
-./openvpn-bin --config "$OVPN_CONF" \
+/usr/sbin/openvpn --config "$OVPN_CONF" \
     --verb 3 --auth-nocache --inactive 3600 \
     --proto "${PROTO:-tcp}" --remote "$SRV" "$PORT" \
     --script-security 2 \
+    --up /etc/openvpn/up.sh \
+    --down /etc/openvpn/down.sh \
+    --fast-io \
     --route-up '/usr/bin/env rm /tmp/saml-response.txt' \
     --auth-user-pass <( printf "%s\n%s\n" "N/A" "CRV1::$VPN_SID::$(cat /tmp/saml-response.txt)" )
