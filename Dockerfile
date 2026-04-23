@@ -26,8 +26,10 @@ WORKDIR /opt/go-server
 COPY server.go ./
 
 # Build go server
-RUN go mod init server \
-    && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -o server ./server.go
+RUN apk add --no-cache upx \
+    && go mod init server \
+    && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-s -w" -o server ./server.go \
+    && upx --best server
 
 FROM alpine:3.20.3 AS container
 
