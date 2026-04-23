@@ -1,5 +1,6 @@
 services:
   vpn:
+    image: aws-vpn-client
     build:
       context: .
       dockerfile: Dockerfile

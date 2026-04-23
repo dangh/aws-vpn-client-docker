@@ -20,25 +20,28 @@ FROM --platform=$BUILDPLATFORM golang:1.23.1-alpine3.20 AS server-builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG OPTIMIZE=false
 
 WORKDIR /opt/go-server
 
 COPY server.go ./
 
-# Build go server
-RUN apk add --no-cache upx \
-    && go mod init server \
-    && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-s -w" -o server ./server.go \
-    && upx --best server
+RUN go mod init server \
+    && if [ "$OPTIMIZE" = "true" ]; then \
+         apk add --no-cache upx \
+         && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-s -w" -o server ./server.go \
+         && upx --best server; \
+       else \
+         CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -o server ./server.go; \
+       fi
 
 FROM alpine:3.20.3 AS container
 
 WORKDIR /opt/openvpn
 
-RUN apk add --no-cache bash busybox-binsh openvpn libnl3 openssl bind-tools
+RUN apk add --no-cache openvpn libnl3 openssl bind-tools
 
 COPY --from=ovpn-builder /opt/openvpn/install-root/ /
 COPY --from=server-builder /opt/go-server/server /usr/sbin/saml_server
-COPY entrypoint.sh .
 
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["/usr/sbin/saml_server"]
