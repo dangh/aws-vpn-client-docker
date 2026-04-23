@@ -1,2 +1,2 @@
 #!/bin/sh
-echo connected > /tmp/vpn-status
+echo connected > /tmp/vpn-events

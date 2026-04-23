@@ -1,2 +1,2 @@
 #!/bin/sh
-echo disconnected > /tmp/vpn-status
+echo disconnected > /tmp/vpn-events

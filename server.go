@@ -14,15 +14,17 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 const port = "35001"
-const statusFile = "/tmp/vpn-status"
+const eventFifo = "/tmp/vpn-events"
 
 var (
-	vpnSID    string
-	vpn       *vpnState
-	activeCmd *exec.Cmd
+	vpnSID     string
+	vpn        *vpnState
+	activeCmd  *exec.Cmd
+	connStatus = "idle"
 )
 
 type vpnState struct {
@@ -68,18 +70,24 @@ const indexHTML = `<!DOCTYPE html>
 </body>
 </html>`
 
-func writeStatus(s string) {
-	if err := os.WriteFile(statusFile, []byte(s), 0644); err != nil {
-		log.Printf("writeStatus: %v", err)
+func listenEvents() {
+	os.Remove(eventFifo)
+	if err := syscall.Mkfifo(eventFifo, 0600); err != nil {
+		log.Fatalf("mkfifo: %v", err)
 	}
-}
-
-func readStatus() string {
-	b, err := os.ReadFile(statusFile)
+	// O_RDWR keeps the read end open so reads don't return EOF when no writer is connected
+	f, err := os.OpenFile(eventFifo, os.O_RDWR, os.ModeNamedPipe)
 	if err != nil {
-		return "idle"
+		log.Fatalf("open fifo: %v", err)
 	}
-	return strings.TrimSpace(string(b))
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		s := strings.TrimSpace(scanner.Text())
+		if s == "connected" || s == "disconnected" {
+			connStatus = s
+			log.Printf("VPN status: %s", s)
+		}
+	}
 }
 
 func processOVPN(data []byte) (*vpnState, error) {
@@ -199,15 +207,15 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 		log.Printf("openvpn exited: %v", err)
 	}
 	activeCmd = nil
-	writeStatus("disconnected") // fallback if route-pre-down.sh didn't fire
+	connStatus = "disconnected" // fallback if route-pre-down.sh didn't fire
 }
 
 func main() {
-	writeStatus("idle")
+	go listenEvents()
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":%q}`, readStatus())
+		fmt.Fprintf(w, `{"status":%q}`, connStatus)
 	})
 
 	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
@@ -277,15 +285,14 @@ func main() {
 			encoded := url.QueryEscape(samlResponse)
 			log.Printf("Received SAML response, launching VPN connection.")
 			if vpn != nil {
-				writeStatus("connecting")
+				connStatus = "connecting"
 				go connectVPN(vpn, vpnSID, encoded)
 			}
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		s := readStatus()
-		fmt.Fprintf(w, indexHTML, s, s)
+		fmt.Fprintf(w, indexHTML, connStatus, connStatus)
 	})
 
 	log.Printf("Listening at http://localhost:%s", port)
