@@ -20,9 +20,10 @@ import (
 const port = "35001"
 
 var (
-	mu     sync.Mutex
-	vpnSID string
-	vpn    *vpnState
+	mu         sync.Mutex
+	vpnSID     string
+	vpn        *vpnState
+	connStatus = "idle" // idle | connecting | connected | disconnected
 )
 
 type vpnState struct {
@@ -43,14 +44,28 @@ const indexHTML = `<!DOCTYPE html>
     body { font-family: sans-serif; max-width: 480px; margin: 60px auto; padding: 0 16px; }
     h2 { margin-bottom: 24px; }
     label { display: block; margin-bottom: 8px; }
+    #status { margin-bottom: 20px; padding: 10px 14px; border-radius: 4px; font-weight: bold; }
+    #status.idle         { background: #f1f3f4; color: #666; }
+    #status.connecting   { background: #fef9e7; color: #b45309; }
+    #status.connected    { background: #e6f4ea; color: #2d6a2d; }
+    #status.disconnected { background: #fce8e6; color: #c5221f; }
   </style>
 </head>
 <body>
   <h2>AWS VPN</h2>
+  <div id="status" class="idle">idle</div>
   <form method="POST" action="/upload" enctype="multipart/form-data">
     <label>Select .ovpn file to connect</label>
     <input type="file" name="ovpn" accept=".ovpn" onchange="this.form.submit()">
   </form>
+  <script>
+    const el = document.getElementById('status');
+    setInterval(async () => {
+      const { status } = await fetch('/status').then(r => r.json());
+      el.className = status;
+      el.textContent = status;
+    }, 2000);
+  </script>
 </body>
 </html>`
 
@@ -150,6 +165,12 @@ func getAuthURL(v *vpnState) (authURL, sid string, err error) {
 	return
 }
 
+func setStatus(s string) {
+	mu.Lock()
+	connStatus = s
+	mu.Unlock()
+}
+
 func connectVPN(v *vpnState, sid, encodedSAML string) {
 	cmd := exec.Command("/usr/sbin/openvpn",
 		"--config", v.confPath,
@@ -157,6 +178,7 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 		"--proto", v.proto, "--remote", v.srv, v.port,
 		"--script-security", "2",
 		"--up", "/etc/openvpn/up.sh",
+		"--route-up", "/etc/openvpn/notify-up.sh",
 		"--down", "/etc/openvpn/down.sh",
 		"--fast-io",
 		"--auth-user-pass", "/dev/stdin",
@@ -167,9 +189,26 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 	if err := cmd.Run(); err != nil {
 		log.Printf("openvpn exited: %v", err)
 	}
+	setStatus("disconnected") // fallback if down.sh didn't fire
 }
 
 func main() {
+	http.HandleFunc("/vpn-event", func(w http.ResponseWriter, r *http.Request) {
+		s := r.URL.Query().Get("status")
+		if s == "connected" || s == "disconnected" {
+			setStatus(s)
+			log.Printf("VPN status: %s", s)
+		}
+	})
+
+	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		s := connStatus
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":%q}`, s)
+	})
+
 	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.NotFound(w, r)
@@ -242,6 +281,7 @@ func main() {
 			fmt.Fprintf(w, "Connecting to VPN...<script>window.close()</script>")
 			log.Printf("Received SAML response, launching VPN connection.")
 			if v != nil {
+				setStatus("connecting")
 				go connectVPN(v, sid, encoded)
 			}
 			return

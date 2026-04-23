@@ -43,5 +43,7 @@ RUN apk add --no-cache openvpn libnl3 openssl bind-tools
 
 COPY --from=ovpn-builder /opt/openvpn/install-root/ /
 COPY --from=server-builder /opt/go-server/server /usr/sbin/saml_server
+COPY notify-up.sh /etc/openvpn/
+RUN chmod +x /etc/openvpn/notify-up.sh
 
 ENTRYPOINT ["/usr/sbin/saml_server"]
