@@ -1,3 +1,5 @@
+name: aws-vpn-client
+
 services:
   vpn:
     image: aws-vpn-client
@@ -5,10 +7,26 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: no
-    volumes:
-      - ./profile.ovpn:/opt/openvpn/profile.ovpn:ro
+    configs:
+      - source: vpn_profile
+        target: /etc/openvpn/profile.ovpn
     devices:
-      - "/dev/net/tun:/dev/net/tun"
+      - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
-    network_mode: host
+    ports:
+      - "35001:35001"
+      - "8888:8888"
+
+  proxy:
+    image: kalaksi/tinyproxy
+    network_mode: "service:vpn"
+    environment:
+      TINYPROXY_PORT: "8888"
+      TINYPROXY_ALLOW: "0.0.0.0/0"
+    depends_on:
+      - vpn
+
+configs:
+  vpn_profile:
+    file: ./profile.ovpn

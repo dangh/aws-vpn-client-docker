@@ -25,11 +25,19 @@ const (
 )
 
 var statusMessages = map[string]string{
-	"idle":         "Disconnected \U0001F513",
+	"idle":         "Disconnected",
 	"connecting":   "Connecting...",
-	"connected":    "Connected \U0001F510",
-	"disconnected": "Disconnected \U0001F513",
-	"error":        "Server not found \u26D3\uFE0F\u200D\U0001F4A5",
+	"connected":    "Connected",
+	"disconnected": "Disconnected",
+	"error":        "Container's down",
+}
+
+var statusEmojis = map[string]string{
+	"idle":         "\U0001F513",
+	"connecting":   "\u23F3",
+	"connected":    "\U0001F510",
+	"disconnected": "\U0001F513",
+	"error":        "\u26D3\uFE0F\u200D\U0001F4A5",
 }
 
 // mutable VPN session state — all mutations happen on the HTTP server goroutine
@@ -59,10 +67,14 @@ const indexHTML = `<!DOCTYPE html>
   <meta charset="utf-8">
   <title>AWS VPN</title>
   <style>
-    body { font-family: sans-serif; max-width: 480px; margin: 60px auto; padding: 0 16px; }
-    h2 { margin-bottom: 24px; }
+    body { font-family: sans-serif; margin: 60px auto; padding: 0 16px; max-width: 560px; }
+    #app { display: grid; grid-template-columns: auto 1fr; column-gap: 24px; row-gap: 20px; }
+    #emoji { grid-column: 1; grid-row: 1; align-self: center; font-size: 6em; line-height: 1; }
+    #top { grid-column: 2; grid-row: 1; }
+    #rest { grid-column: 2; grid-row: 2; }
+    h2 { margin: 0 0 12px; }
     label { display: block; margin-bottom: 8px; }
-    #status { margin-bottom: 20px; padding: 10px 14px; border-radius: 4px; font-weight: bold; }
+    #status { display: inline-block; padding: 6px 14px; border-radius: 4px; font-weight: bold; }
     #status.idle         { background: #f1f3f4; color: #666; }
     #status.connecting   { background: #fef9e7; color: #b45309; }
     #status.connected    { background: #e6f4ea; color: #2d6a2d; }
@@ -71,21 +83,31 @@ const indexHTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h2>AWS VPN</h2>
-  <div id="status" class="%s">%s</div>
-  <form method="POST" action="/upload" enctype="multipart/form-data">
-    <label>Select .ovpn file to connect</label>
-    <input type="file" name="ovpn" accept=".ovpn" onchange="this.form.submit()">
-  </form>
+  <div id="app">
+    <span id="emoji">%s</span>
+    <div id="top">
+      <h2>AWS VPN</h2>
+      <div id="status" class="%s">%s</div>
+    </div>
+    <div id="rest">
+      <form method="POST" action="/upload" enctype="multipart/form-data">
+        <label>Select .ovpn file to connect</label>
+        <input type="file" name="ovpn" accept=".ovpn" onchange="this.form.submit()">
+      </form>
+    </div>
+  </div>
   <script>
-    const el = document.getElementById('status');
+    const emojis = { idle: '🔓', connecting: '⏳', connected: '🔐', disconnected: '🔓', error: '⛓️‍💥' };
+    const statusEl = document.getElementById('status');
+    const emojiEl = document.getElementById('emoji');
     function setStatus(status, message) {
-      el.className = status;
-      el.textContent = message;
+      statusEl.className = status;
+      emojiEl.textContent = emojis[status] || '';
+      statusEl.textContent = message;
     }
     const es = new EventSource('/events');
     es.onmessage = ({ data }) => { const { status, message } = JSON.parse(data); setStatus(status, message); };
-    es.onerror = () => setStatus('error', 'Server not found \u26D3\uFE0F\u200D\uD83D\uDCA5');
+    es.onerror = () => setStatus('error', "Container's down");
   </script>
 </body>
 </html>`
@@ -414,7 +436,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, indexHTML, connStatus, statusMessages[connStatus])
+	fmt.Fprintf(w, indexHTML, statusEmojis[connStatus], connStatus, statusMessages[connStatus])
 }
 
 func main() {
