@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -18,12 +19,15 @@ import (
 	"time"
 )
 
-const port = "35001"
-const eventFifo = "/tmp/vpn-events"
+const (
+	port        = "35001"
+	profilePath = "/etc/openvpn/profile.ovpn"
+	eventFifo   = "/tmp/vpn-events"
+)
 
 var statusMessages = map[string]string{
 	"idle":         "Disconnected \U0001F513",
-	"connecting":   "Tunneling...",
+	"connecting":   "Tunneling...", // initial; animation ticker takes over immediately
 	"connected":    "Connected \U0001F510",
 	"disconnected": "Disconnected \U0001F513",
 	"error":        "Server not found \u26D3\uFE0F\u200D\U0001F4A5",
@@ -35,8 +39,7 @@ var connectingVerbs = []string{
 	"Handshaking...", "Cloaking...",
 }
 
-var stopConnecting chan struct{}
-
+// mutable VPN session state — all mutations happen on the HTTP server goroutine
 var (
 	vpnSID         string
 	vpn            *vpnState
@@ -46,6 +49,7 @@ var (
 	pendingAuthURL string
 	profileBound   bool
 	authURLDone    chan struct{}
+	stopConnecting chan struct{}
 )
 
 type vpnState struct {
@@ -88,14 +92,15 @@ const indexHTML = `<!DOCTYPE html>
       el.textContent = message;
     }
     const es = new EventSource('/events');
-    es.onmessage = ({ data }) => { const [s, m] = data.split('\n'); setStatus(s, m); };
+    es.onmessage = ({ data }) => { const { status, message } = JSON.parse(data); setStatus(status, message); };
     es.onerror = () => setStatus('error', 'Server not found \u26D3\uFE0F\u200D\uD83D\uDCA5');
   </script>
 </body>
 </html>`
 
-func ssePayload(s string) string {
-	return "data: " + s + "\ndata: " + statusMessages[s]
+func ssePayload(status, message string) string {
+	b, _ := json.Marshal(map[string]string{"status": status, "message": message})
+	return "data: " + string(b)
 }
 
 func fanOut(payload string) {
@@ -107,11 +112,58 @@ func fanOut(payload string) {
 	}
 }
 
+func stopAnimation() {
+	if stopConnecting != nil {
+		close(stopConnecting)
+		stopConnecting = nil
+	}
+}
+
+func startAnimation() {
+	stopConnecting = make(chan struct{})
+	go func(stop chan struct{}) {
+		t := time.NewTicker(800 * time.Millisecond)
+		defer t.Stop()
+		i := 1
+		for {
+			select {
+			case <-t.C:
+				fanOut(ssePayload("connecting", connectingVerbs[i%len(connectingVerbs)]))
+				i++
+			case <-stop:
+				return
+			}
+		}
+	}(stopConnecting)
+}
+
+func setConnStatus(s string) {
+	stopAnimation()
+	connStatus = s
+	if s == "connecting" {
+		startAnimation()
+	}
+	if s == "connected" || s == "error" {
+		pendingAuthURL = ""
+	}
+	if s == "disconnected" && profileBound && pendingAuthURL == "" {
+		go autoConnect()
+	}
+}
+
+func broadcast(s string) {
+	setConnStatus(s)
+	fanOut(ssePayload(s, statusMessages[s]))
+}
+
 func autoConnect() {
-	data, err := os.ReadFile("/etc/openvpn/profile.ovpn")
+	data, err := os.ReadFile(profilePath)
 	if err != nil {
 		return
 	}
+	// authURLDone signals waiting GET / handlers that the auth URL is ready.
+	// The identity check in the defer guards against a later autoConnect call
+	// replacing authURLDone before this instance's defer runs.
 	done := make(chan struct{})
 	authURLDone = done
 	defer func() {
@@ -124,57 +176,16 @@ func autoConnect() {
 	log.Printf("auto-connect: found profile, initiating auth...")
 	broadcast("connecting")
 
-	state, err := processOVPN(data)
+	authURL, err := beginAuth(data)
 	if err != nil {
 		log.Printf("auto-connect: %v", err)
 		broadcast("error")
 		return
 	}
-	vpn = state
-
-	authURL, sid, err := getAuthURL(state)
-	if err != nil || authURL == "" {
-		log.Printf("auto-connect: get auth URL: %v", err)
-		broadcast("error")
-		return
-	}
-	vpnSID = sid
 	pendingAuthURL = authURL
 	profileBound = true
 	broadcast("disconnected")
-	log.Printf("auto-connect: auth URL ready — open http://localhost:%s/auth to authenticate", port)
-}
-
-func broadcast(s string) {
-	if stopConnecting != nil {
-		close(stopConnecting)
-		stopConnecting = nil
-	}
-	connStatus = s
-	fanOut(ssePayload(s))
-	if s == "connecting" {
-		stopConnecting = make(chan struct{})
-		go func(stop chan struct{}) {
-			t := time.NewTicker(800 * time.Millisecond)
-			defer t.Stop()
-			i := 1
-			for {
-				select {
-				case <-t.C:
-					fanOut("data: connecting\ndata: " + connectingVerbs[i%len(connectingVerbs)])
-					i++
-				case <-stop:
-					return
-				}
-			}
-		}(stopConnecting)
-	}
-	if s == "connected" || s == "error" {
-		pendingAuthURL = ""
-	}
-	if s == "disconnected" && profileBound && pendingAuthURL == "" {
-		go autoConnect()
-	}
+	log.Printf("auto-connect: auth URL ready — open http://localhost:%s to authenticate", port)
 }
 
 func listenEvents() {
@@ -217,10 +228,13 @@ func processOVPN(data []byte) (*vpnState, error) {
 				vpnHost = fields[1]
 				vpnPort = fields[2]
 			}
-		default:
-			if fields[0] == "proto" && len(fields) >= 2 {
+			// strip — server address is resolved via DNS and passed via --remote flag
+		case "proto":
+			if len(fields) >= 2 {
 				vpnProto = fields[1]
 			}
+			lines = append(lines, line)
+		default:
 			lines = append(lines, line)
 		}
 	}
@@ -317,142 +331,136 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 	broadcast("disconnected") // fallback if route-pre-down.sh didn't fire
 }
 
-func main() {
-	go listenEvents()
-	go autoConnect()
+func beginAuth(data []byte) (string, error) {
+	state, err := processOVPN(data)
+	if err != nil {
+		return "", err
+	}
+	if vpn != nil {
+		os.Remove(vpn.confPath)
+	}
+	if activeCmd != nil && activeCmd.Process != nil {
+		log.Printf("Killing existing VPN connection")
+		activeCmd.Process.Kill()
+	}
+	authURL, sid, err := getAuthURL(state)
+	if err != nil || authURL == "" {
+		if err == nil {
+			err = fmt.Errorf("auth URL not found in openvpn output")
+		}
+		return "", err
+	}
+	vpn = state
+	vpnSID = sid
+	return authURL, nil
+}
 
-	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "SSE not supported", http.StatusInternalServerError)
+func handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := make(chan string, 1)
+	sseClients[ch] = struct{}{}
+	defer delete(sseClients, ch)
+
+	fmt.Fprintf(w, "%s\n\n", ssePayload(connStatus, statusMessages[connStatus]))
+	flusher.Flush()
+
+	for {
+		select {
+		case s := <-ch:
+			fmt.Fprintf(w, "%s\n\n", s)
+			flusher.Flush()
+		case <-r.Context().Done():
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+	}
+}
 
-		ch := make(chan string, 1)
-		sseClients[ch] = struct{}{}
-		defer delete(sseClients, ch)
+func handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseMultipartForm(4 << 20); err != nil {
+		http.Error(w, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("ovpn")
+	if err != nil {
+		http.Error(w, "missing ovpn file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
 
-		fmt.Fprintf(w, "%s\n\n", ssePayload(connStatus))
-		flusher.Flush()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "read error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-		for {
-			select {
-			case s := <-ch:
-				fmt.Fprintf(w, "%s\n\n", s)
-				flusher.Flush()
-			case <-r.Context().Done():
-				return
-			}
-		}
-	})
+	authURL, err := beginAuth(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
 
-	http.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
 		if pendingAuthURL != "" {
 			http.Redirect(w, r, pendingAuthURL, http.StatusFound)
 			return
 		}
-		done := authURLDone
-		if done == nil {
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
-		// auto-connect in progress — wait for the auth URL
-		select {
-		case <-done:
-			if pendingAuthURL != "" {
-				http.Redirect(w, r, pendingAuthURL, http.StatusFound)
-			} else {
-				http.Redirect(w, r, "/", http.StatusFound)
+		if done := authURLDone; done != nil {
+			select {
+			case <-done:
+				if pendingAuthURL != "" {
+					http.Redirect(w, r, pendingAuthURL, http.StatusFound)
+					return
+				}
+			case <-r.Context().Done():
+				return
 			}
-		case <-r.Context().Done():
 		}
-	})
-
-	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.NotFound(w, r)
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "parse error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := r.ParseMultipartForm(4 << 20); err != nil {
-			http.Error(w, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+		samlResponse := r.FormValue("SAMLResponse")
+		if samlResponse == "" {
+			http.Error(w, "missing SAMLResponse", http.StatusBadRequest)
 			return
 		}
-		file, _, err := r.FormFile("ovpn")
-		if err != nil {
-			http.Error(w, "missing ovpn file: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
-
-		data, err := io.ReadAll(file)
-		if err != nil {
-			http.Error(w, "read error: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		state, err := processOVPN(data)
-		if err != nil {
-			http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
+		encoded := url.QueryEscape(samlResponse)
+		log.Printf("Received SAML response, launching VPN connection.")
 		if vpn != nil {
-			os.Remove(vpn.confPath)
+			broadcast("connecting")
+			go connectVPN(vpn, vpnSID, encoded)
 		}
-		vpn = state
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, indexHTML, connStatus, statusMessages[connStatus])
+}
 
-		if activeCmd != nil && activeCmd.Process != nil {
-			log.Printf("Killing existing VPN connection for new profile")
-			activeCmd.Process.Kill()
-		}
+func main() {
+	go listenEvents()
+	go autoConnect()
 
-		log.Printf("Config uploaded, resolved server %s:%s (%s)", state.srv, state.port, state.proto)
-
-		authURL, sid, err := getAuthURL(state)
-		if err != nil || authURL == "" {
-			log.Printf("Failed to get auth URL: %v", err)
-			http.Error(w, "Failed to get auth URL from openvpn", http.StatusInternalServerError)
-			return
-		}
-
-		vpnSID = sid
-
-		log.Printf("Redirecting to auth URL")
-		http.Redirect(w, r, authURL, http.StatusFound)
-	})
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && pendingAuthURL != "" {
-			url := pendingAuthURL
-			pendingAuthURL = ""
-			http.Redirect(w, r, url, http.StatusFound)
-			return
-		}
-		if r.Method == http.MethodPost {
-			if err := r.ParseForm(); err != nil {
-				fmt.Fprintf(w, "ParseForm() err: %v", err)
-				return
-			}
-			samlResponse := r.FormValue("SAMLResponse")
-			if samlResponse == "" {
-				log.Printf("SAMLResponse field is empty or not exists")
-				return
-			}
-			encoded := url.QueryEscape(samlResponse)
-			log.Printf("Received SAML response, launching VPN connection.")
-			if vpn != nil {
-				broadcast("connecting")
-				go connectVPN(vpn, vpnSID, encoded)
-			}
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, indexHTML, connStatus, statusMessages[connStatus])
-	})
+	http.HandleFunc("/events", handleEvents)
+	http.HandleFunc("/upload", handleUpload)
+	http.HandleFunc("/", handleRoot)
 
 	log.Printf("Listening at http://localhost:%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
