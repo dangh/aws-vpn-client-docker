@@ -15,16 +15,34 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const port = "35001"
 const eventFifo = "/tmp/vpn-events"
+
+var statusMessages = map[string]string{
+	"idle":         "Disconnected \U0001F513",
+	"connecting":   "Tunneling...",
+	"connected":    "Connected \U0001F510",
+	"disconnected": "Disconnected \U0001F513",
+	"error":        "Server not found \u26D3\uFE0F\u200D\U0001F4A5",
+}
+
+var connectingVerbs = []string{
+	"Tunneling...", "Encrypting...", "Negotiating...",
+	"Authenticating...", "Routing...", "Securing...",
+	"Handshaking...", "Cloaking...",
+}
+
+var stopConnecting chan struct{}
 
 var (
 	vpnSID     string
 	vpn        *vpnState
 	activeCmd  *exec.Cmd
 	connStatus = "idle"
+	sseClients = map[chan string]struct{}{}
 )
 
 type vpnState struct {
@@ -50,6 +68,7 @@ const indexHTML = `<!DOCTYPE html>
     #status.connecting   { background: #fef9e7; color: #b45309; }
     #status.connected    { background: #e6f4ea; color: #2d6a2d; }
     #status.disconnected { background: #fce8e6; color: #c5221f; }
+    #status.error        { background: #f3e8ff; color: #6b21a8; }
   </style>
 </head>
 <body>
@@ -61,14 +80,55 @@ const indexHTML = `<!DOCTYPE html>
   </form>
   <script>
     const el = document.getElementById('status');
-    setInterval(async () => {
-      const { status } = await fetch('/status').then(r => r.json());
+    function setStatus(status, message) {
       el.className = status;
-      el.textContent = status;
-    }, 2000);
+      el.textContent = message;
+    }
+    const es = new EventSource('/events');
+    es.onmessage = ({ data }) => { const [s, m] = data.split('\n'); setStatus(s, m); };
+    es.onerror = () => setStatus('error', 'Server not found \u26D3\uFE0F\u200D\uD83D\uDCA5');
   </script>
 </body>
 </html>`
+
+func ssePayload(s string) string {
+	return "data: " + s + "\ndata: " + statusMessages[s]
+}
+
+func fanOut(payload string) {
+	for ch := range sseClients {
+		select {
+		case ch <- payload:
+		default:
+		}
+	}
+}
+
+func broadcast(s string) {
+	if stopConnecting != nil {
+		close(stopConnecting)
+		stopConnecting = nil
+	}
+	connStatus = s
+	fanOut(ssePayload(s))
+	if s == "connecting" {
+		stopConnecting = make(chan struct{})
+		go func(stop chan struct{}) {
+			t := time.NewTicker(800 * time.Millisecond)
+			defer t.Stop()
+			i := 1
+			for {
+				select {
+				case <-t.C:
+					fanOut("data: connecting\ndata: " + connectingVerbs[i%len(connectingVerbs)])
+					i++
+				case <-stop:
+					return
+				}
+			}
+		}(stopConnecting)
+	}
+}
 
 func listenEvents() {
 	os.Remove(eventFifo)
@@ -84,8 +144,8 @@ func listenEvents() {
 	for scanner.Scan() {
 		s := strings.TrimSpace(scanner.Text())
 		if s == "connected" || s == "disconnected" {
-			connStatus = s
 			log.Printf("VPN status: %s", s)
+			broadcast(s)
 		}
 	}
 }
@@ -207,15 +267,38 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 		log.Printf("openvpn exited: %v", err)
 	}
 	activeCmd = nil
-	connStatus = "disconnected" // fallback if route-pre-down.sh didn't fire
+	broadcast("disconnected") // fallback if route-pre-down.sh didn't fire
 }
 
 func main() {
 	go listenEvents()
 
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":%q}`, connStatus)
+	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "SSE not supported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		ch := make(chan string, 1)
+		sseClients[ch] = struct{}{}
+		defer delete(sseClients, ch)
+
+		fmt.Fprintf(w, "%s\n\n", ssePayload(connStatus))
+		flusher.Flush()
+
+		for {
+			select {
+			case s := <-ch:
+				fmt.Fprintf(w, "%s\n\n", s)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
 	})
 
 	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
@@ -285,14 +368,14 @@ func main() {
 			encoded := url.QueryEscape(samlResponse)
 			log.Printf("Received SAML response, launching VPN connection.")
 			if vpn != nil {
-				connStatus = "connecting"
+				broadcast("connecting")
 				go connectVPN(vpn, vpnSID, encoded)
 			}
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, indexHTML, connStatus, connStatus)
+		fmt.Fprintf(w, indexHTML, connStatus, statusMessages[connStatus])
 	})
 
 	log.Printf("Listening at http://localhost:%s", port)
