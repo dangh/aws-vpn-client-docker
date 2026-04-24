@@ -38,11 +38,14 @@ var connectingVerbs = []string{
 var stopConnecting chan struct{}
 
 var (
-	vpnSID     string
-	vpn        *vpnState
-	activeCmd  *exec.Cmd
-	connStatus = "idle"
-	sseClients = map[chan string]struct{}{}
+	vpnSID         string
+	vpn            *vpnState
+	activeCmd      *exec.Cmd
+	connStatus     = "idle"
+	sseClients     = map[chan string]struct{}{}
+	pendingAuthURL string
+	profileBound   bool
+	authURLDone    chan struct{}
 )
 
 type vpnState struct {
@@ -104,6 +107,44 @@ func fanOut(payload string) {
 	}
 }
 
+func autoConnect() {
+	data, err := os.ReadFile("/etc/openvpn/profile.ovpn")
+	if err != nil {
+		return
+	}
+	done := make(chan struct{})
+	authURLDone = done
+	defer func() {
+		close(done)
+		if authURLDone == done {
+			authURLDone = nil
+		}
+	}()
+
+	log.Printf("auto-connect: found profile, initiating auth...")
+	broadcast("connecting")
+
+	state, err := processOVPN(data)
+	if err != nil {
+		log.Printf("auto-connect: %v", err)
+		broadcast("error")
+		return
+	}
+	vpn = state
+
+	authURL, sid, err := getAuthURL(state)
+	if err != nil || authURL == "" {
+		log.Printf("auto-connect: get auth URL: %v", err)
+		broadcast("error")
+		return
+	}
+	vpnSID = sid
+	pendingAuthURL = authURL
+	profileBound = true
+	broadcast("disconnected")
+	log.Printf("auto-connect: auth URL ready — open http://localhost:%s/auth to authenticate", port)
+}
+
 func broadcast(s string) {
 	if stopConnecting != nil {
 		close(stopConnecting)
@@ -127,6 +168,12 @@ func broadcast(s string) {
 				}
 			}
 		}(stopConnecting)
+	}
+	if s == "connected" || s == "error" {
+		pendingAuthURL = ""
+	}
+	if s == "disconnected" && profileBound && pendingAuthURL == "" {
+		go autoConnect()
 	}
 }
 
@@ -272,6 +319,7 @@ func connectVPN(v *vpnState, sid, encodedSAML string) {
 
 func main() {
 	go listenEvents()
+	go autoConnect()
 
 	http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
@@ -298,6 +346,28 @@ func main() {
 			case <-r.Context().Done():
 				return
 			}
+		}
+	})
+
+	http.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
+		if pendingAuthURL != "" {
+			http.Redirect(w, r, pendingAuthURL, http.StatusFound)
+			return
+		}
+		done := authURLDone
+		if done == nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		// auto-connect in progress — wait for the auth URL
+		select {
+		case <-done:
+			if pendingAuthURL != "" {
+				http.Redirect(w, r, pendingAuthURL, http.StatusFound)
+			} else {
+				http.Redirect(w, r, "/", http.StatusFound)
+			}
+		case <-r.Context().Done():
 		}
 	})
 
@@ -355,6 +425,12 @@ func main() {
 	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && pendingAuthURL != "" {
+			url := pendingAuthURL
+			pendingAuthURL = ""
+			http.Redirect(w, r, url, http.StatusFound)
+			return
+		}
 		if r.Method == http.MethodPost {
 			if err := r.ParseForm(); err != nil {
 				fmt.Fprintf(w, "ParseForm() err: %v", err)
