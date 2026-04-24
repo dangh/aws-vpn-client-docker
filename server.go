@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
-	"time"
 )
 
 const (
@@ -27,16 +26,10 @@ const (
 
 var statusMessages = map[string]string{
 	"idle":         "Disconnected \U0001F513",
-	"connecting":   "Tunneling...", // initial; animation ticker takes over immediately
+	"connecting":   "Connecting...",
 	"connected":    "Connected \U0001F510",
 	"disconnected": "Disconnected \U0001F513",
 	"error":        "Server not found \u26D3\uFE0F\u200D\U0001F4A5",
-}
-
-var connectingVerbs = []string{
-	"Tunneling...", "Encrypting...", "Negotiating...",
-	"Authenticating...", "Routing...", "Securing...",
-	"Handshaking...", "Cloaking...",
 }
 
 // mutable VPN session state — all mutations happen on the HTTP server goroutine
@@ -49,7 +42,6 @@ var (
 	pendingAuthURL string
 	profileBound   bool
 	authURLDone    chan struct{}
-	stopConnecting chan struct{}
 )
 
 type vpnState struct {
@@ -112,37 +104,8 @@ func fanOut(payload string) {
 	}
 }
 
-func stopAnimation() {
-	if stopConnecting != nil {
-		close(stopConnecting)
-		stopConnecting = nil
-	}
-}
-
-func startAnimation() {
-	stopConnecting = make(chan struct{})
-	go func(stop chan struct{}) {
-		t := time.NewTicker(800 * time.Millisecond)
-		defer t.Stop()
-		i := 1
-		for {
-			select {
-			case <-t.C:
-				fanOut(ssePayload("connecting", connectingVerbs[i%len(connectingVerbs)]))
-				i++
-			case <-stop:
-				return
-			}
-		}
-	}(stopConnecting)
-}
-
 func setConnStatus(s string) {
-	stopAnimation()
 	connStatus = s
-	if s == "connecting" {
-		startAnimation()
-	}
 	if s == "connected" || s == "error" {
 		pendingAuthURL = ""
 	}
