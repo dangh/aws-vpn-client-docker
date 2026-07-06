@@ -295,7 +295,8 @@ func getAuthURL(v *vpnState) (authURL, sid string, err error) {
 func connectVPN(v *vpnState, sid, encodedSAML string) {
 	cmd := exec.Command("/usr/sbin/openvpn",
 		"--config", v.confPath,
-		"--verb", "3", "--auth-nocache", "--inactive", "3600",
+		"--verb", "3", "--auth-nocache",
+		"--mute-replay-warnings", "--mssfix", "1300",
 		"--proto", v.proto, "--remote", v.srv, v.port,
 		"--script-security", "2",
 		"--up", "/etc/openvpn/up.sh",
