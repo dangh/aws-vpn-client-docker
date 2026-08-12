@@ -44,7 +44,9 @@ If you are using a fork, the image path will be `ghcr.io/<owner>/aws-vpn-client:
 ## Save a profile for one-click reconnect
 
 Set the `SAVE_PROFILE` env var (`1`/`true`/`yes`/`on`) to persist an uploaded
-`.ovpn` profile to `/data/profile.ovpn` inside the container. Once saved, a
+`.ovpn` profile to `/data/profile.ovpn` inside the container. The profile is saved
+**only after it connects successfully**, so an invalid profile is never stored. Any
+previously saved profile is cleared the moment you upload a new file. Once saved, a
 **Reconnect with saved profile** button appears in the web UI
 (`http://localhost:35001`) — click it to re-run the SAML login without
 re-uploading the file.

@@ -63,6 +63,9 @@ var (
 	// saveProfileEnabled persists an uploaded profile to savedProfilePath for
 	// one-click reconnect. Controlled by the SAVE_PROFILE env var (see main).
 	saveProfileEnabled bool
+	// pendingProfile holds an uploaded profile that is written to savedProfilePath
+	// only once the VPN reports "connected" — so a bad profile is never saved.
+	pendingProfile []byte
 	// autoReconnectEnabled re-runs auth automatically when a user visits the web UI
 	// after a dropped session. Controlled by the AUTO_RECONNECT env var (see main).
 	autoReconnectEnabled bool
@@ -149,6 +152,14 @@ func setConnStatus(s string) {
 	connStatus = s
 	if s == "connected" {
 		wasConnected = true
+		if saveProfileEnabled && pendingProfile != nil {
+			if err := saveProfile(pendingProfile); err != nil {
+				log.Printf("save profile: %v", err)
+			} else {
+				log.Printf("profile saved to %s", savedProfilePath)
+			}
+			pendingProfile = nil
+		}
 	}
 	if s == "connected" || s == "error" {
 		pendingAuthURL = ""
@@ -182,6 +193,15 @@ func saveProfile(data []byte) error {
 		return err
 	}
 	return os.WriteFile(savedProfilePath, data, 0600)
+}
+
+// clearSavedProfile drops any persisted profile and pending save. Called when a new
+// upload arrives so a stale profile can't be reconnected to.
+func clearSavedProfile() {
+	pendingProfile = nil
+	if err := os.Remove(savedProfilePath); err != nil && !os.IsNotExist(err) {
+		log.Printf("clear saved profile: %v", err)
+	}
 }
 
 // beginReconnect re-runs SAML auth from the saved (or mounted) profile, exactly as
@@ -446,17 +466,17 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A new upload supersedes any previously saved profile: drop the old file now,
+	// regardless of outcome. The new one is only persisted once it connects.
+	clearSavedProfile()
+
 	authURL, err := beginAuth(data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if saveProfileEnabled {
-		if err := saveProfile(data); err != nil {
-			log.Printf("save profile: %v", err)
-		} else {
-			log.Printf("profile saved to %s", savedProfilePath)
-		}
+		pendingProfile = data // persisted only when the VPN reports "connected"
 	}
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
