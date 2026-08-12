@@ -53,11 +53,19 @@ var (
 	connStatus     = "idle"
 	sseClients     = map[chan string]struct{}{}
 	pendingAuthURL string
-	profileBound   bool
 	authURLDone    chan struct{}
-	// saveProfile persists an uploaded profile to savedProfilePath for one-click
-	// reconnect. Controlled by the SAVE_PROFILE env var (see main).
+	// wasConnected is true once the VPN has reached "connected" this run. It gates
+	// auto-reconnect so we only re-auth after a dropped session — never on a fresh
+	// container start or when the profile is invalid (never connected).
+	wasConnected bool
+	// reconnecting guards the on-visit auto-reconnect path from firing concurrently.
+	reconnecting bool
+	// saveProfileEnabled persists an uploaded profile to savedProfilePath for
+	// one-click reconnect. Controlled by the SAVE_PROFILE env var (see main).
 	saveProfileEnabled bool
+	// autoReconnectEnabled re-runs auth automatically when a user visits the web UI
+	// after a dropped session. Controlled by the AUTO_RECONNECT env var (see main).
+	autoReconnectEnabled bool
 )
 
 type vpnState struct {
@@ -139,11 +147,11 @@ func fanOut(payload string) {
 
 func setConnStatus(s string) {
 	connStatus = s
+	if s == "connected" {
+		wasConnected = true
+	}
 	if s == "connected" || s == "error" {
 		pendingAuthURL = ""
-	}
-	if s == "disconnected" && profileBound && pendingAuthURL == "" {
-		go autoConnect()
 	}
 }
 
@@ -176,9 +184,22 @@ func saveProfile(data []byte) error {
 	return os.WriteFile(savedProfilePath, data, 0600)
 }
 
-func autoConnect() {
+// beginReconnect re-runs SAML auth from the saved (or mounted) profile, exactly as
+// clicking the Reconnect button does, and returns the auth URL to redirect to.
+func beginReconnect() (string, error) {
 	data, ok := loadProfile()
 	if !ok {
+		return "", fmt.Errorf("no saved profile")
+	}
+	return beginAuth(data)
+}
+
+// autoConnect prepares SAML auth at startup, but only for an explicitly mounted
+// read-only profile (profilePath). A profile saved via SAVE_PROFILE is NOT
+// auto-started on boot — the user reconnects it via the web UI.
+func autoConnect() {
+	data, err := os.ReadFile(profilePath)
+	if err != nil {
 		return
 	}
 	// authURLDone signals waiting GET / handlers that the auth URL is ready.
@@ -203,7 +224,6 @@ func autoConnect() {
 		return
 	}
 	pendingAuthURL = authURL
-	profileBound = true
 	broadcast("disconnected")
 	log.Printf("auto-connect: auth URL ready — open http://localhost:%s to authenticate", port)
 }
@@ -443,6 +463,23 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		// Auto-reconnect: only after a session that was connected and then dropped
+		// this run. wasConnected stays false on a fresh start or an invalid profile,
+		// so neither triggers this.
+		if autoReconnectEnabled && wasConnected && connStatus == "disconnected" && pendingAuthURL == "" && !reconnecting {
+			reconnecting = true
+			wasConnected = false
+			authURL, err := beginReconnect()
+			reconnecting = false
+			if err != nil {
+				log.Printf("auto-reconnect: %v", err)
+			} else {
+				pendingAuthURL = authURL
+				log.Printf("auto-reconnect: session dropped, re-authenticating")
+				http.Redirect(w, r, authURL, http.StatusFound)
+				return
+			}
+		}
 		if pendingAuthURL != "" {
 			http.Redirect(w, r, pendingAuthURL, http.StatusFound)
 			return
@@ -491,25 +528,30 @@ func handleReconnect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	data, ok := loadProfile()
-	if !ok {
-		http.Error(w, "no saved profile", http.StatusBadRequest)
-		return
-	}
-	authURL, err := beginAuth(data)
+	authURL, err := beginReconnect()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	profileBound = true
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
-func main() {
-	switch strings.ToLower(os.Getenv("SAVE_PROFILE")) {
+func envEnabled(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
 	case "1", "true", "yes", "on":
-		saveProfileEnabled = true
+		return true
+	}
+	return false
+}
+
+func main() {
+	saveProfileEnabled = envEnabled("SAVE_PROFILE")
+	if saveProfileEnabled {
 		log.Printf("SAVE_PROFILE enabled: uploaded profiles persisted to %s", savedProfilePath)
+	}
+	autoReconnectEnabled = envEnabled("AUTO_RECONNECT")
+	if autoReconnectEnabled {
+		log.Printf("AUTO_RECONNECT enabled: re-authenticate on visit after a dropped session")
 	}
 
 	go listenEvents()

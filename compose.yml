@@ -17,6 +17,8 @@ services:
     environment:
       # persist an uploaded profile so the web UI's Reconnect button works
       SAVE_PROFILE: "true"
+      # after a dropped session, re-authenticate automatically on the next web UI visit
+      AUTO_RECONNECT: "true"
     ports:
       - "35001:35001"
       - "8888:8888"

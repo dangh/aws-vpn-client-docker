@@ -60,6 +60,21 @@ To keep the saved profile across container recreation, mount a volume at `/data`
 Without a `/data` volume the saved profile still survives `docker restart`, but is
 lost when the container is removed/recreated.
 
+### Auto-reconnect on visit
+
+Set `AUTO_RECONNECT` (`1`/`true`/`yes`/`on`) to skip the button: after a session
+that was connected and then dropped (e.g. the SAML session expired), the next visit
+to the web UI re-runs auth automatically, as if you had clicked Reconnect.
+
+- `docker compose` sets `AUTO_RECONNECT: "true"` (see `compose.yml`).
+- `docker run` — add `-e AUTO_RECONNECT=true`.
+
+It fires **only** for a session that dropped after being connected in the running
+container. It deliberately does **not** fire on a fresh container start, after a
+restart, or when the profile is invalid (auth never succeeded) — in those cases you
+connect/reconnect manually. Pair it with a mounted profile or `SAVE_PROFILE` so a
+profile is available to reconnect from.
+
 ### Multi-arch publishing
 GitHub Actions publishes a multi-platform image from `.github/workflows/docker-publish.yml`.
 
