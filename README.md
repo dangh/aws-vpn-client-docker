@@ -77,7 +77,82 @@ restart, or when the profile is invalid (auth never succeeded) — in those case
 connect/reconnect manually. Pair it with a mounted profile or `SAVE_PROFILE` so a
 profile is available to reconnect from.
 
-### Multi-arch publishing
+## Custom OpenVPN hooks
+
+OpenVPN runs internal hook scripts on connect/disconnect. Each one calls, in order:
+
+1. the alpine package script (DNS setup on `up`, restore on `down`),
+2. **your** script, if present at the reserved path below and executable,
+3. the connect/disconnect event the web UI listens for.
+
+Drop your own logic in any of these reserved paths — all optional, run only if
+present and executable:
+
+| Reserved path | Runs when | Typical use |
+| --- | --- | --- |
+| `/etc/openvpn/up.sh` | tunnel is up (after DNS) | extra setup |
+| `/etc/openvpn/down.sh` | tunnel is going down | cleanup |
+| `/etc/openvpn/route-up.sh` | routes are installed | add/adjust routes |
+| `/etc/openvpn/route-pre-down.sh` | before routes are torn down | undo route changes |
+
+Your script must be executable (mode `0555`/`+x`). It receives OpenVPN's usual
+environment (`dev`, `route_net_gateway`, `foreign_option_*`, …). Don't emit the
+connect/disconnect event yourself — the container already does.
+
+Provide a script either by bind-mounting a file or, with `docker compose`, by
+inlining it as a config (no extra files):
+
+```yaml
+services:
+  vpn:
+    configs:
+      - source: route_up
+        target: /etc/openvpn/route-up.sh
+        mode: 0555            # must be executable
+
+configs:
+  route_up:
+    content: |
+      #!/bin/sh
+      echo "route-up ran, gateway is $$route_net_gateway"
+```
+
+> In compose `content:`, escape every `$` as `$$` so compose doesn't interpolate
+> it — the script receives a single `$`.
+
+### Example: reach the container over your LAN (proxy use case)
+
+Run an HTTP proxy inside the VPN's network namespace (e.g. tinyproxy with
+`network_mode: "service:vpn"`) and use it from other machines on your LAN, so
+their traffic exits through the VPN. When the VPN takes over the default route,
+replies to LAN clients would be sent into the tunnel and lost. Pin your LAN
+subnet(s) back to the local gateway with a `route-up.sh` hook:
+
+```sh
+#!/bin/sh
+# Keep LAN clients able to reach the proxy after the VPN takes the default route.
+# Set LAN_SUBNET in the environment (space-separated for multiple subnets).
+if [ -n "$LAN_SUBNET" ]; then
+	# LAN gateway + interface = the default route that is NOT the VPN tunnel
+	DEF="$(ip route show default | awk '$5 !~ /^tun/ {print; exit}')"
+	GW="$(echo "$DEF" | awk '{print $3}')"
+	DEV="$(echo "$DEF" | awk '{print $5}')"
+	if [ -n "$GW" ] && [ -n "$DEV" ]; then
+		for net in $LAN_SUBNET; do
+			ip route add "$net" via "$GW" dev "$DEV" || true
+			echo "Added LAN route $net via $GW dev $DEV"
+		done
+	fi
+fi
+```
+
+The proxy's own upstream requests still egress through the VPN — only replies to
+the original LAN clients are pinned to the local interface. `compose.yml` ships
+this exact example, inlined as the `route_up` config and driven by a `LAN_SUBNET`
+env var (set it to your clients' subnet, e.g. `192.168.10.0/24`). It needs no
+extra packages — `ip` is provided by the base image's busybox.
+
+## Multi-arch publishing
 GitHub Actions publishes a multi-platform image from `.github/workflows/docker-publish.yml`.
 
 On pushes to `master` and version tags, the workflow builds and publishes:

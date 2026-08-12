@@ -1,0 +1,7 @@
+#!/bin/sh
+# Internal --down hook (openvpn calls this; see server.go). Chains (reverse of up):
+#   1. the user override at /etc/openvpn/down.sh, if present and executable
+#   2. alpine package down script (restore resolv.conf), kept as down.alpine.sh
+[ -x /etc/openvpn/down.sh ] && /etc/openvpn/down.sh "$@"
+[ -x /etc/openvpn/down.alpine.sh ] && /etc/openvpn/down.alpine.sh "$@"
+exit 0

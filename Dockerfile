@@ -41,9 +41,15 @@ WORKDIR /opt/openvpn
 
 RUN apk add --no-cache openvpn libnl3 openssl bind-tools
 
+# The alpine openvpn package installs its up/down (DNS) scripts to
+# /etc/openvpn/{up,down}.sh. Move them aside so those paths stay free for user
+# overrides; our hooks (below) still call them as *.alpine.sh.
+RUN mv /etc/openvpn/up.sh /etc/openvpn/up.alpine.sh \
+    && mv /etc/openvpn/down.sh /etc/openvpn/down.alpine.sh
+
 COPY --from=ovpn-builder /opt/openvpn/install-root/ /
 COPY --from=server-builder /opt/go-server/server /usr/sbin/awsvpn
 COPY etc/openvpn/ /etc/openvpn/
-RUN chmod +x /etc/openvpn/route-up.sh /etc/openvpn/route-pre-down.sh
+RUN chmod +x /etc/openvpn/hooks/*
 
 ENTRYPOINT ["/usr/sbin/awsvpn"]

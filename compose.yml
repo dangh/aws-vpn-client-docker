@@ -10,6 +10,12 @@ services:
     configs:
       - source: vpn_profile
         target: /etc/openvpn/profile.ovpn
+      # sample route-up hook (see the route_up config at the bottom). Keeps LAN
+      # clients able to reach the proxy after the VPN takes the default route.
+      # mode 0555 so openvpn can execute it. Remove this to disable.
+      - source: route_up
+        target: /etc/openvpn/route-up.sh
+        mode: 0555
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
@@ -19,6 +25,10 @@ services:
       SAVE_PROFILE: "true"
       # after a dropped session, re-authenticate automatically on the next web UI visit
       AUTO_RECONNECT: "true"
+      # subnet(s) of clients that reach the proxy over the LAN; space-separated for
+      # multiple. Read by the route_up config below. Leave unset to disable the
+      # LAN route (e.g. if you don't expose the proxy over the LAN).
+      LAN_SUBNET: "192.168.10.0/24"
     ports:
       - "35001:35001"
       - "8888:8888"
@@ -38,6 +48,24 @@ services:
 configs:
   vpn_profile:
     file: ./profile.ovpn
+  # sample deployment-only route-up hook, inlined so nothing is baked into the
+  # image. Pins each subnet in $LAN_SUBNET back to the LAN gateway (skipping the
+  # VPN) so LAN clients can still reach the proxy; the proxy's own upstream fetch
+  # still egresses through the VPN. No-op when LAN_SUBNET is unset.
+  route_up:
+    content: |
+      #!/bin/sh
+      if [ -n "$$LAN_SUBNET" ]; then
+        DEF="$$(ip route show default | awk '$$5 !~ /^tun/ {print; exit}')"
+        GW="$$(echo "$$DEF" | awk '{print $$3}')"
+        DEV="$$(echo "$$DEF" | awk '{print $$5}')"
+        if [ -n "$$GW" ] && [ -n "$$DEV" ]; then
+          for net in $$LAN_SUBNET; do
+            ip route add "$$net" via "$$GW" dev "$$DEV" || true
+            echo "Added LAN route $$net via $$GW dev $$DEV"
+          done
+        fi
+      fi
 
 volumes:
   vpn_data:

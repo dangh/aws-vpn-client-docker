@@ -1,0 +1,7 @@
+#!/bin/sh
+# Internal --route-up hook (openvpn calls this; see server.go). Runs the user
+# override if present, then emits the connect event the web UI listens for.
+# (No alpine route-up script exists; alpine only ships up/down.)
+[ -x /etc/openvpn/route-up.sh ] && /etc/openvpn/route-up.sh "$@"
+echo connected > /tmp/vpn-events
+exit 0

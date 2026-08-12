@@ -1,0 +1,7 @@
+#!/bin/sh
+# Internal --up hook (openvpn calls this; see server.go). Chains:
+#   1. alpine package up script (DNS/resolv.conf setup), kept as up.alpine.sh
+#   2. the user override at /etc/openvpn/up.sh, if present and executable
+[ -x /etc/openvpn/up.alpine.sh ] && /etc/openvpn/up.alpine.sh "$@"
+[ -x /etc/openvpn/up.sh ] && /etc/openvpn/up.sh "$@"
+exit 0

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Internal --route-pre-down hook (openvpn calls this; see server.go). Runs the
+# user override if present, then emits the disconnect event.
+[ -x /etc/openvpn/route-pre-down.sh ] && /etc/openvpn/route-pre-down.sh "$@"
+echo disconnected > /tmp/vpn-events
+exit 0
