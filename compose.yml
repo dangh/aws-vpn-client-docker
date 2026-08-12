@@ -2,7 +2,7 @@ name: aws-vpn-client
 
 services:
   vpn:
-    image: ghcr.io/dangh/aws-vpn-client:latest
+    image: ghcr.io/dangh/aws-vpn-client:master
     restart: no
     configs:
       # sample route-up hook (see the route_up config at the bottom). Keeps LAN
