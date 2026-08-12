@@ -23,23 +23,19 @@ This repository aims to package the work of Alex Samorukov and Botify Labs on ma
 ## How to use
 
 ### Use a prebuilt container
-1. Download your AWS VPN client profile into a directory
-2. Run `docker run --name vpn -d --net host -v /path/to/profile.ovpn:/opt/openvpn/profile.ovpn:ro -e SAVE_PROFILE=true -v vpn-data:/data --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN ghcr.io/dangh/aws-vpn-client:latest`
-   - `-e SAVE_PROFILE=true -v vpn-data:/data` persists an uploaded profile for the web UI's Reconnect button (optional; see below).
-   1. Run `docker logs -f vpn` to grab the login link
-   2. After logging in, you can safely exit the log tail with `Ctrl-C`
-3. Enjoy
+1. Download your AWS VPN client profile (`cvpn-endpoint-*.ovpn`)
+2. Run `docker run --name vpn -d --net host -e SAVE_PROFILE=true -v vpn-data:/data --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN ghcr.io/dangh/aws-vpn-client:latest`
+   - `-e SAVE_PROFILE=true -v vpn-data:/data` persists the uploaded profile for the web UI's Reconnect button (optional; see below).
+3. Open the web UI (`http://localhost:35001`) and upload your `.ovpn` — this starts the SAML login.
+4. Enjoy
 
 If you are using a fork, the image path will be `ghcr.io/<owner>/aws-vpn-client:<tag>`.
 
 ### Build the container yourself
 1. Clone this repository
-2. Download your AWS VPN client profile into a directory.
-3. Adjust the mount source (`./profile.ovpn`) in `compose.yml` to read your ovpn profile file (`cvpn-endpoint-*.ovpn`)
-   1. Don't change the mount target (`/opt/openvpn/profile.ovpn`)!
-4. Run `docker compose up --build`
-   1. Also grab the login link from `docker compose logs`
-6. Enjoy
+2. Run `docker compose up --build`
+3. Open the web UI (`http://localhost:35001`) and upload your AWS VPN client profile (`cvpn-endpoint-*.ovpn`) — this starts the SAML login. `SAVE_PROFILE` (set in `compose.yml`) persists it for the Reconnect button.
+4. Enjoy
 
 ## Save a profile for one-click reconnect
 
@@ -74,8 +70,8 @@ to the web UI re-runs auth automatically, as if you had clicked Reconnect.
 It fires **only** for a session that dropped after being connected in the running
 container. It deliberately does **not** fire on a fresh container start, after a
 restart, or when the profile is invalid (auth never succeeded) — in those cases you
-connect/reconnect manually. Pair it with a mounted profile or `SAVE_PROFILE` so a
-profile is available to reconnect from.
+connect/reconnect manually. Pair it with `SAVE_PROFILE` so a profile is available
+to reconnect from.
 
 ## Custom OpenVPN hooks
 

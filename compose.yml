@@ -8,8 +8,6 @@ services:
       dockerfile: Dockerfile
     restart: no
     configs:
-      - source: vpn_profile
-        target: /etc/openvpn/profile.ovpn
       # sample route-up hook (see the route_up config at the bottom). Keeps LAN
       # clients able to reach the proxy after the VPN takes the default route.
       # mode 0555 so openvpn can execute it. Remove this to disable.
@@ -46,8 +44,6 @@ services:
       - vpn
 
 configs:
-  vpn_profile:
-    file: ./profile.ovpn
   # sample deployment-only route-up hook, inlined so nothing is baked into the
   # image. Pins each subnet in $LAN_SUBNET back to the LAN gateway (skipping the
   # VPN) so LAN clients can still reach the proxy; the proxy's own upstream fetch

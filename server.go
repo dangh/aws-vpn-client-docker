@@ -21,10 +21,8 @@ import (
 
 const (
 	port = "35001"
-	// profilePath is an optional read-only profile mounted at container start.
-	profilePath = "/etc/openvpn/profile.ovpn"
-	// savedProfilePath holds a profile persisted via the web UI's "Remember this
-	// profile" option. Mount /data as a volume to keep it across container recreation.
+	// savedProfilePath holds a profile persisted from a web UI upload (see
+	// SAVE_PROFILE). Mount /data as a volume to keep it across container recreation.
 	savedProfilePath = "/data/profile.ovpn"
 	eventFifo        = "/tmp/vpn-events"
 )
@@ -53,7 +51,6 @@ var (
 	connStatus     = "idle"
 	sseClients     = map[chan string]struct{}{}
 	pendingAuthURL string
-	authURLDone    chan struct{}
 	// wasConnected is true once the VPN has reached "connected" this run. It gates
 	// auto-reconnect so we only re-auth after a dropped session — never on a fresh
 	// container start or when the profile is invalid (never connected).
@@ -171,13 +168,10 @@ func broadcast(s string) {
 	fanOut(ssePayload(s, statusMessages[s]))
 }
 
-// loadProfile returns profile bytes, preferring one saved via the web UI over a
-// read-only mounted profile. ok is false when neither exists.
+// loadProfile returns bytes of the profile saved from a web UI upload. ok is
+// false when none has been saved yet.
 func loadProfile() (data []byte, ok bool) {
 	if b, err := os.ReadFile(savedProfilePath); err == nil {
-		return b, true
-	}
-	if b, err := os.ReadFile(profilePath); err == nil {
 		return b, true
 	}
 	return nil, false
@@ -204,48 +198,14 @@ func clearSavedProfile() {
 	}
 }
 
-// beginReconnect re-runs SAML auth from the saved (or mounted) profile, exactly as
-// clicking the Reconnect button does, and returns the auth URL to redirect to.
+// beginReconnect re-runs SAML auth from the saved profile, exactly as clicking
+// the Reconnect button does, and returns the auth URL to redirect to.
 func beginReconnect() (string, error) {
 	data, ok := loadProfile()
 	if !ok {
 		return "", fmt.Errorf("no saved profile")
 	}
 	return beginAuth(data)
-}
-
-// autoConnect prepares SAML auth at startup, but only for an explicitly mounted
-// read-only profile (profilePath). A profile saved via SAVE_PROFILE is NOT
-// auto-started on boot — the user reconnects it via the web UI.
-func autoConnect() {
-	data, err := os.ReadFile(profilePath)
-	if err != nil {
-		return
-	}
-	// authURLDone signals waiting GET / handlers that the auth URL is ready.
-	// The identity check in the defer guards against a later autoConnect call
-	// replacing authURLDone before this instance's defer runs.
-	done := make(chan struct{})
-	authURLDone = done
-	defer func() {
-		close(done)
-		if authURLDone == done {
-			authURLDone = nil
-		}
-	}()
-
-	log.Printf("auto-connect: found profile, initiating auth...")
-	broadcast("connecting")
-
-	authURL, err := beginAuth(data)
-	if err != nil {
-		log.Printf("auto-connect: %v", err)
-		broadcast("error")
-		return
-	}
-	pendingAuthURL = authURL
-	broadcast("disconnected")
-	log.Printf("auto-connect: auth URL ready — open http://localhost:%s to authenticate", port)
 }
 
 func listenEvents() {
@@ -504,17 +464,6 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, pendingAuthURL, http.StatusFound)
 			return
 		}
-		if done := authURLDone; done != nil {
-			select {
-			case <-done:
-				if pendingAuthURL != "" {
-					http.Redirect(w, r, pendingAuthURL, http.StatusFound)
-					return
-				}
-			case <-r.Context().Done():
-				return
-			}
-		}
 	}
 	if r.Method == http.MethodPost {
 		if err := r.ParseForm(); err != nil {
@@ -575,7 +524,6 @@ func main() {
 	}
 
 	go listenEvents()
-	go autoConnect()
 
 	http.HandleFunc("/events", handleEvents)
 	http.HandleFunc("/upload", handleUpload)
