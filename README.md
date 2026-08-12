@@ -31,6 +31,22 @@ docker run --name vpn -d \
 `SAVE_PROFILE` enables one-click reconnect. Mount a volume at `/data` only if
 the saved profile must survive container removal and recreation.
 
+### Remote Docker host
+
+AWS VPN redirects SAML authentication to <http://localhost:35001>. When Docker
+runs on a remote host, forward that port to your local machine before opening
+the web UI:
+
+```sh
+ssh -N \
+  -L 35001:localhost:35001 \
+  user@remote-host
+```
+
+Keep the SSH session open, then visit <http://localhost:35001>. This is local
+SSH forwarding (`-L`): the browser's local callback is carried to the remote
+container.
+
 ## Credits
 
 This image packages the OpenVPN work from
