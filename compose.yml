@@ -2,10 +2,7 @@ name: aws-vpn-client
 
 services:
   vpn:
-    image: aws-vpn-client
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/dangh/aws-vpn-client:latest
     restart: no
     configs:
       # sample route-up hook (see the route_up config at the bottom). Keeps LAN
@@ -23,13 +20,10 @@ services:
       SAVE_PROFILE: "true"
       # after a dropped session, re-authenticate automatically on the next web UI visit
       AUTO_RECONNECT: "true"
-      # subnet(s) of clients that reach the proxy over the LAN; space-separated for
-      # multiple. Read by the route_up config below. Leave unset to disable the
-      # LAN route (e.g. if you don't expose the proxy over the LAN).
-      LAN_SUBNET: "192.168.10.0/24"
+      LAN_SUBNET: "${LAN_SUBNET:-}"
     ports:
       - "35001:35001"
-      - "8888:8888"
+      - "${PROXY_PORT:-8888}:${PROXY_PORT:-8888}"
     volumes:
       # persists a profile saved via the web UI so "Reconnect" survives recreation
       - vpn_data:/data
@@ -38,7 +32,7 @@ services:
     image: kalaksi/tinyproxy
     network_mode: "service:vpn"
     environment:
-      TINYPROXY_PORT: "8888"
+      TINYPROXY_PORT: "${PROXY_PORT:-8888}"
       TINYPROXY_ALLOW: "0.0.0.0/0"
     depends_on:
       - vpn
