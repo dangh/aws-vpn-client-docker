@@ -13,15 +13,20 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
 )
 
 const (
-	port        = "35001"
+	port = "35001"
+	// profilePath is an optional read-only profile mounted at container start.
 	profilePath = "/etc/openvpn/profile.ovpn"
-	eventFifo   = "/tmp/vpn-events"
+	// savedProfilePath holds a profile persisted via the web UI's "Remember this
+	// profile" option. Mount /data as a volume to keep it across container recreation.
+	savedProfilePath = "/data/profile.ovpn"
+	eventFifo        = "/tmp/vpn-events"
 )
 
 var statusMessages = map[string]string{
@@ -50,6 +55,9 @@ var (
 	pendingAuthURL string
 	profileBound   bool
 	authURLDone    chan struct{}
+	// saveProfile persists an uploaded profile to savedProfilePath for one-click
+	// reconnect. Controlled by the SAVE_PROFILE env var (see main).
+	saveProfileEnabled bool
 )
 
 type vpnState struct {
@@ -80,6 +88,8 @@ const indexHTML = `<!DOCTYPE html>
     #status.connected    { background: #e6f4ea; color: #2d6a2d; }
     #status.disconnected { background: #fce8e6; color: #c5221f; }
     #status.error        { background: #f3e8ff; color: #6b21a8; }
+    #reconnect { margin-top: 20px; }
+    #reconnect button { padding: 8px 16px; font-size: 1em; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -94,6 +104,7 @@ const indexHTML = `<!DOCTYPE html>
         <label>Select .ovpn file to connect</label>
         <input type="file" name="ovpn" accept=".ovpn" onchange="this.form.submit()">
       </form>
+      %s
     </div>
   </div>
   <script>
@@ -141,9 +152,33 @@ func broadcast(s string) {
 	fanOut(ssePayload(s, statusMessages[s]))
 }
 
+// loadProfile returns profile bytes, preferring one saved via the web UI over a
+// read-only mounted profile. ok is false when neither exists.
+func loadProfile() (data []byte, ok bool) {
+	if b, err := os.ReadFile(savedProfilePath); err == nil {
+		return b, true
+	}
+	if b, err := os.ReadFile(profilePath); err == nil {
+		return b, true
+	}
+	return nil, false
+}
+
+func hasProfile() bool {
+	_, ok := loadProfile()
+	return ok
+}
+
+func saveProfile(data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(savedProfilePath), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(savedProfilePath, data, 0600)
+}
+
 func autoConnect() {
-	data, err := os.ReadFile(profilePath)
-	if err != nil {
+	data, ok := loadProfile()
+	if !ok {
 		return
 	}
 	// authURLDone signals waiting GET / handlers that the auth URL is ready.
@@ -396,6 +431,13 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if saveProfileEnabled {
+		if err := saveProfile(data); err != nil {
+			log.Printf("save profile: %v", err)
+		} else {
+			log.Printf("profile saved to %s", savedProfilePath)
+		}
+	}
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -437,15 +479,45 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, indexHTML, statusEmojis[connStatus], connStatus, statusMessages[connStatus])
+	reconnectHTML := ""
+	if hasProfile() {
+		reconnectHTML = `<form id="reconnect" method="POST" action="/reconnect"><button type="submit">Reconnect with saved profile</button></form>`
+	}
+	fmt.Fprintf(w, indexHTML, statusEmojis[connStatus], connStatus, statusMessages[connStatus], reconnectHTML)
+}
+
+func handleReconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	data, ok := loadProfile()
+	if !ok {
+		http.Error(w, "no saved profile", http.StatusBadRequest)
+		return
+	}
+	authURL, err := beginAuth(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	profileBound = true
+	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 func main() {
+	switch strings.ToLower(os.Getenv("SAVE_PROFILE")) {
+	case "1", "true", "yes", "on":
+		saveProfileEnabled = true
+		log.Printf("SAVE_PROFILE enabled: uploaded profiles persisted to %s", savedProfilePath)
+	}
+
 	go listenEvents()
 	go autoConnect()
 
 	http.HandleFunc("/events", handleEvents)
 	http.HandleFunc("/upload", handleUpload)
+	http.HandleFunc("/reconnect", handleReconnect)
 	http.HandleFunc("/", handleRoot)
 
 	log.Printf("Listening at http://localhost:%s", port)

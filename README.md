@@ -24,7 +24,8 @@ This repository aims to package the work of Alex Samorukov and Botify Labs on ma
 
 ### Use a prebuilt container
 1. Download your AWS VPN client profile into a directory
-2. Run `docker run --name vpn -d --net host -v /path/to/profile.ovpn:/opt/openvpn/profile.ovpn:ro --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN ghcr.io/dangh/aws-vpn-client:latest`
+2. Run `docker run --name vpn -d --net host -v /path/to/profile.ovpn:/opt/openvpn/profile.ovpn:ro -e SAVE_PROFILE=true -v vpn-data:/data --device /dev/net/tun:/dev/net/tun --cap-add NET_ADMIN ghcr.io/dangh/aws-vpn-client:latest`
+   - `-e SAVE_PROFILE=true -v vpn-data:/data` persists an uploaded profile for the web UI's Reconnect button (optional; see below).
    1. Run `docker logs -f vpn` to grab the login link
    2. After logging in, you can safely exit the log tail with `Ctrl-C`
 3. Enjoy
@@ -39,6 +40,25 @@ If you are using a fork, the image path will be `ghcr.io/<owner>/aws-vpn-client:
 4. Run `docker compose up --build`
    1. Also grab the login link from `docker compose logs`
 6. Enjoy
+
+## Save a profile for one-click reconnect
+
+Set the `SAVE_PROFILE` env var (`1`/`true`/`yes`/`on`) to persist an uploaded
+`.ovpn` profile to `/data/profile.ovpn` inside the container. Once saved, a
+**Reconnect with saved profile** button appears in the web UI
+(`http://localhost:35001`) — click it to re-run the SAML login without
+re-uploading the file.
+
+- `docker compose` sets `SAVE_PROFILE: "true"` (see `compose.yml`).
+- `docker run` — add `-e SAVE_PROFILE=true`.
+
+To keep the saved profile across container recreation, mount a volume at `/data`:
+
+- `docker compose` already declares the `vpn_data` volume.
+- `docker run` — add `-v vpn-data:/data`.
+
+Without a `/data` volume the saved profile still survives `docker restart`, but is
+lost when the container is removed/recreated.
 
 ### Multi-arch publishing
 GitHub Actions publishes a multi-platform image from `.github/workflows/docker-publish.yml`.

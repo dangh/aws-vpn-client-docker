@@ -14,9 +14,15 @@ services:
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
+    environment:
+      # persist an uploaded profile so the web UI's Reconnect button works
+      SAVE_PROFILE: "true"
     ports:
       - "35001:35001"
       - "8888:8888"
+    volumes:
+      # persists a profile saved via the web UI so "Reconnect" survives recreation
+      - vpn_data:/data
 
   proxy:
     image: kalaksi/tinyproxy
@@ -30,3 +36,6 @@ services:
 configs:
   vpn_profile:
     file: ./profile.ovpn
+
+volumes:
+  vpn_data:
