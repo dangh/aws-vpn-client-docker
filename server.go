@@ -10,12 +10,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -66,6 +68,11 @@ var (
 	// autoReconnectEnabled re-runs auth automatically when a user visits the web UI
 	// after a dropped session. Controlled by the AUTO_RECONNECT env var (see main).
 	autoReconnectEnabled bool
+	// publicURL is where the browser is sent after the SAML callback completes.
+	// With the shared 35001 dispatcher a relative "/" would strand the user on the
+	// dispatcher; PUBLIC_PORT sets this to http://localhost:<port> so they land
+	// back on this profile's own web UI. Defaults to "/".
+	publicURL = "/"
 )
 
 type vpnState struct {
@@ -373,7 +380,29 @@ func beginAuth(data []byte) (string, error) {
 	}
 	vpn = state
 	vpnSID = sid
+	registerACS()
 	return authURL, nil
+}
+
+// registerACS tells the shared dispatcher (see runDispatcher) that this instance
+// just began SAML auth, so the fixed 127.0.0.1:35001 callback is routed here. It
+// is a no-op unless ACS_DISPATCHER and ACS_SELF are set, so single-profile
+// deployments are unaffected. Auth is serialized on the host's one 35001, so
+// "last to begin auth wins" is the correct routing.
+func registerACS() {
+	dispatcher := os.Getenv("ACS_DISPATCHER") // e.g. http://dispatcher:35001
+	self := os.Getenv("ACS_SELF")             // e.g. vpn-a:35001
+	if dispatcher == "" || self == "" {
+		return
+	}
+	u := dispatcher + "/_register?target=" + url.QueryEscape(self)
+	resp, err := http.Post(u, "text/plain", nil)
+	if err != nil {
+		log.Printf("ACS register failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("ACS registered with dispatcher as %s", self)
 }
 
 func handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -481,7 +510,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 			broadcast("connecting")
 			go connectVPN(vpn, vpnSID, encoded)
 		}
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, publicURL, http.StatusFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html")
@@ -513,7 +542,52 @@ func envEnabled(key string) bool {
 	return false
 }
 
+// runDispatcher is the shared front for the host's single 127.0.0.1:35001, used
+// when running several VPN profiles at once. AWS mandates the SAML callback ACS
+// URL be exactly http://127.0.0.1:35001 for every profile, so only one process
+// can own that host port. This dispatcher owns it and forwards each SAML POST to
+// whichever VPN instance most recently began auth (registered via /_register).
+// Enabled by DISPATCHER=true. See compose.yml.
+func runDispatcher() {
+	var mu sync.Mutex
+	var target string // host:port of the instance currently awaiting its SAML callback
+
+	http.HandleFunc("/_register", func(w http.ResponseWriter, r *http.Request) {
+		t := r.URL.Query().Get("target")
+		if t == "" {
+			http.Error(w, "missing target", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		target = t
+		mu.Unlock()
+		log.Printf("dispatcher: active auth target = %s", t)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		t := target
+		mu.Unlock()
+		if t == "" {
+			http.Error(w, "no active auth target; start a connection from a VPN web UI first", http.StatusServiceUnavailable)
+			return
+		}
+		httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: t}).ServeHTTP(w, r)
+	})
+
+	log.Printf("dispatcher listening on :%s, forwarding SAML callback to the active target", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatal(err)
+	}
+}
+
 func main() {
+	if envEnabled("DISPATCHER") {
+		runDispatcher()
+		return
+	}
+
 	saveProfileEnabled = envEnabled("SAVE_PROFILE")
 	if saveProfileEnabled {
 		log.Printf("SAVE_PROFILE enabled: uploaded profiles persisted to %s", savedProfilePath)
@@ -521,6 +595,10 @@ func main() {
 	autoReconnectEnabled = envEnabled("AUTO_RECONNECT")
 	if autoReconnectEnabled {
 		log.Printf("AUTO_RECONNECT enabled: re-authenticate on visit after a dropped session")
+	}
+	if p := os.Getenv("PUBLIC_PORT"); p != "" {
+		publicURL = "http://localhost:" + p
+		log.Printf("PUBLIC_PORT set: redirecting to %s after auth", publicURL)
 	}
 
 	go listenEvents()

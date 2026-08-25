@@ -1,41 +1,92 @@
 name: aws-vpn-client
 
+# Two VPN profiles running at once, each exposed as its own HTTP proxy.
+#
+# AWS mandates the SAML callback land on http://127.0.0.1:35001 for EVERY
+# profile, so that host port can only belong to one process. The `dispatcher`
+# owns 35001 and forwards each SAML POST to whichever profile most recently
+# began auth. Auth is therefore serialized (connect one profile, then the
+# other), but both tunnels stay up together afterwards.
+#
+#   Profile A: web UI http://localhost:35010, proxy localhost:8888
+#   Profile B: web UI http://localhost:35011, proxy localhost:8889
+#   SAML callback (shared, fixed): http://127.0.0.1:35001
+
+x-vpn: &vpn
+  image: ghcr.io/dangh/aws-vpn-client:master
+  restart: no
+  configs:
+    - source: route_up
+      target: /etc/openvpn/route-up.sh
+      mode: 0555
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  cap_add:
+    - NET_ADMIN
+  environment: &vpn-env
+    SAVE_PROFILE: "true"
+    AUTO_RECONNECT: "true"
+    LAN_SUBNET: "${LAN_SUBNET:-}"
+    # point every profile at the shared 35001 dispatcher
+    ACS_DISPATCHER: "http://dispatcher:35001"
+
+x-proxy: &proxy
+  image: kalaksi/tinyproxy
+  environment:
+    TINYPROXY_ALLOW: "0.0.0.0/0"
+
 services:
-  vpn:
+  # owns the host's single 127.0.0.1:35001 and routes the SAML callback to the
+  # profile currently authenticating.
+  dispatcher:
     image: ghcr.io/dangh/aws-vpn-client:master
     restart: no
-    configs:
-      # sample route-up hook (see the route_up config at the bottom). Keeps LAN
-      # clients able to reach the proxy after the VPN takes the default route.
-      # mode 0555 so openvpn can execute it. Remove this to disable.
-      - source: route_up
-        target: /etc/openvpn/route-up.sh
-        mode: 0555
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
     environment:
-      # persist an uploaded profile so the web UI's Reconnect button works
-      SAVE_PROFILE: "true"
-      # after a dropped session, re-authenticate automatically on the next web UI visit
-      AUTO_RECONNECT: "true"
-      LAN_SUBNET: "${LAN_SUBNET:-}"
+      DISPATCHER: "true"
     ports:
-      - "35001:35001"
-      - "${PROXY_PORT:-8888}:${PROXY_PORT:-8888}"
-    volumes:
-      # persists a profile saved via the web UI so "Reconnect" survives recreation
-      - vpn_data:/data
+      - "127.0.0.1:35001:35001"
 
-  proxy:
-    image: kalaksi/tinyproxy
-    network_mode: "service:vpn"
+  vpn-a:
+    <<: *vpn
     environment:
-      TINYPROXY_PORT: "${PROXY_PORT:-8888}"
+      <<: *vpn-env
+      ACS_SELF: "vpn-a:35001"
+      PUBLIC_PORT: "35010"     # return here after auth (matches the web UI port below)
+    ports:
+      - "35010:35001"          # web UI
+      - "${PROXY_PORT_A:-8888}:${PROXY_PORT_A:-8888}"
+    volumes:
+      - vpn_data_a:/data
+
+  proxy-a:
+    <<: *proxy
+    network_mode: "service:vpn-a"
+    environment:
+      TINYPROXY_PORT: "${PROXY_PORT_A:-8888}"
       TINYPROXY_ALLOW: "0.0.0.0/0"
     depends_on:
-      - vpn
+      - vpn-a
+
+  vpn-b:
+    <<: *vpn
+    environment:
+      <<: *vpn-env
+      ACS_SELF: "vpn-b:35001"
+      PUBLIC_PORT: "35011"     # return here after auth (matches the web UI port below)
+    ports:
+      - "35011:35001"          # web UI
+      - "${PROXY_PORT_B:-8889}:${PROXY_PORT_B:-8889}"
+    volumes:
+      - vpn_data_b:/data
+
+  proxy-b:
+    <<: *proxy
+    network_mode: "service:vpn-b"
+    environment:
+      TINYPROXY_PORT: "${PROXY_PORT_B:-8889}"
+      TINYPROXY_ALLOW: "0.0.0.0/0"
+    depends_on:
+      - vpn-b
 
 configs:
   # sample deployment-only route-up hook, inlined so nothing is baked into the
@@ -58,4 +109,5 @@ configs:
       fi
 
 volumes:
-  vpn_data:
+  vpn_data_a:
+  vpn_data_b:
