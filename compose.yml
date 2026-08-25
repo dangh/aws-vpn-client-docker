@@ -33,7 +33,7 @@ x-vpn: &vpn
 x-proxy: &proxy
   image: kalaksi/tinyproxy
   environment:
-    TINYPROXY_ALLOW: "0.0.0.0/0"
+    ALLOWED_NETWORKS: "0.0.0.0/0"
 
 services:
   # owns the host's single 127.0.0.1:35001 and routes the SAML callback to the
@@ -64,8 +64,8 @@ services:
     <<: *proxy
     network_mode: "service:vpn-a"
     environment:
-      TINYPROXY_PORT: "${PROXY_PORT_A:-8888}"
-      TINYPROXY_ALLOW: "0.0.0.0/0"
+      PORT: "${PROXY_PORT_A:-8888}"
+      ALLOWED_NETWORKS: "0.0.0.0/0"
     depends_on:
       - vpn-a
 
@@ -85,8 +85,8 @@ services:
     <<: *proxy
     network_mode: "service:vpn-b"
     environment:
-      TINYPROXY_PORT: "${PROXY_PORT_B:-8889}"
-      TINYPROXY_ALLOW: "0.0.0.0/0"
+      PORT: "${PROXY_PORT_B:-8889}"
+      ALLOWED_NETWORKS: "0.0.0.0/0"
     depends_on:
       - vpn-b
 
