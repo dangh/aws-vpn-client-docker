@@ -43,6 +43,8 @@ services:
     restart: no
     environment:
       DISPATCHER: "true"
+      # only these upstreams may receive a forwarded SAML callback (fail closed)
+      ACS_ALLOWED_TARGETS: "vpn-a:35001 vpn-b:35001"
     ports:
       - "127.0.0.1:35001:35001"
 

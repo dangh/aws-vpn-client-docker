@@ -552,10 +552,29 @@ func runDispatcher() {
 	var mu sync.Mutex
 	var target string // host:port of the instance currently awaiting its SAML callback
 
+	// Allow-list of upstreams the dispatcher may forward to, from
+	// ACS_ALLOWED_TARGETS (space-separated, e.g. "vpn-a:35001 vpn-b:35001").
+	// /_register is reachable by any local process or an in-browser page via
+	// 127.0.0.1:35001, so an unconstrained target is an SSRF that would leak the
+	// SAML assertion to an attacker-chosen host. Fail closed: unknown or empty
+	// list rejects everything.
+	allowed := map[string]bool{}
+	for _, t := range strings.Fields(os.Getenv("ACS_ALLOWED_TARGETS")) {
+		allowed[t] = true
+	}
+	if len(allowed) == 0 {
+		log.Printf("dispatcher: WARNING ACS_ALLOWED_TARGETS is empty; all /_register requests will be rejected")
+	}
+
 	http.HandleFunc("/_register", func(w http.ResponseWriter, r *http.Request) {
 		t := r.URL.Query().Get("target")
 		if t == "" {
 			http.Error(w, "missing target", http.StatusBadRequest)
+			return
+		}
+		if !allowed[t] {
+			log.Printf("dispatcher: rejected /_register for disallowed target %q", t)
+			http.Error(w, "target not allowed", http.StatusForbidden)
 			return
 		}
 		mu.Lock()
