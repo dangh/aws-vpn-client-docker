@@ -506,6 +506,9 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		encoded := url.QueryEscape(samlResponse)
 		log.Printf("Received SAML response, launching VPN connection.")
+		// The auth URL is consumed — clear it so GET / doesn't bounce back to SAML
+		// (which would auto-POST again via an active IdP session and reload-loop).
+		pendingAuthURL = ""
 		if vpn != nil {
 			broadcast("connecting")
 			go connectVPN(vpn, vpnSID, encoded)
