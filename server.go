@@ -71,7 +71,9 @@ var (
 	// publicURL is where the browser is sent after the SAML callback completes.
 	// With the shared 35001 dispatcher a relative "/" would strand the user on the
 	// dispatcher; PUBLIC_PORT sets this to http://localhost:<port> so they land
-	// back on this profile's own web UI. Defaults to "/".
+	// back on this profile's own web UI. PUBLIC_URL sets the full URL instead (wins
+	// over PUBLIC_PORT), for a UI served under its own name, e.g. a Tailscale node.
+	// Defaults to "/".
 	publicURL = "/"
 )
 
@@ -618,7 +620,10 @@ func main() {
 	if autoReconnectEnabled {
 		log.Printf("AUTO_RECONNECT enabled: re-authenticate on visit after a dropped session")
 	}
-	if p := os.Getenv("PUBLIC_PORT"); p != "" {
+	if u := os.Getenv("PUBLIC_URL"); u != "" {
+		publicURL = u
+		log.Printf("PUBLIC_URL set: redirecting to %s after auth", publicURL)
+	} else if p := os.Getenv("PUBLIC_PORT"); p != "" {
 		publicURL = "http://localhost:" + p
 		log.Printf("PUBLIC_PORT set: redirecting to %s after auth", publicURL)
 	}
