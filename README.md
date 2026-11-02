@@ -90,6 +90,15 @@ ssh -N \
   user@remote-host
 ```
 
+### UI under its own name
+
+When the web UI is reached by another name (for example a Tailscale node that
+forwards to the container), set `PUBLIC_URL` to that UI's full URL, e.g.
+`http://corp.example.ts.net:35001`. After the SAML login the browser returns
+there instead of `http://localhost:$PUBLIC_PORT`. The callback itself still goes
+to `http://127.0.0.1:35001` on the browser's machine, so keep the `-L 35001`
+forward.
+
 ## Credits
 
 This image packages the OpenVPN work from
