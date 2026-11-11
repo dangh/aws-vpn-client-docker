@@ -296,11 +296,15 @@
   };
 
   // Toast
+  $$('dialog').forEach(d => d.insertAdjacentHTML('beforeend', '<div class="sr-only" role="status" aria-live="polite" data-announce></div>'));
   const toast = document.querySelector('.toast');
   let toastTimer;
   function notify(text, kind = 'ok') {
     toast.querySelector('[data-text]').textContent = text;
-    document.getElementById('announce').textContent = text;
+    // Announce from inside an open modal dialog too: the rest of the page is inert then.
+    const region = document.querySelector('dialog[open] [data-announce]') || document.getElementById('announce');
+    region.textContent = '';
+    setTimeout(() => region.textContent = text, 50);
     toast.dataset.kind = kind;
     if (toast.matches(':popover-open')) toast.hidePopover();
     toast.showPopover(); // again: on top of a dialog opened since

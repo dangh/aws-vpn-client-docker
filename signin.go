@@ -1,31 +1,47 @@
 package main
 
 import (
+	"bytes"
+	"compress/flate"
+	"encoding/base64"
+	"encoding/xml"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 // The AWS SAML result of every profile comes back on the one callback port, so the
 // dashboard runs one sign-in at a time. An attempt is reserved before its auth work
-// starts, gets its identity provider URL when the handler redirects there, and ends
-// on the SAML result, a cancel, a failure or the timeout. Only the attempt under way
-// takes a callback, once: a late or repeated callback is refused.
+// starts, gets the ID of its SAML request when the handler redirects to the identity
+// provider, and ends on its own SAML result, a cancel, a failure or the timeout.
+// A callback is taken only when its response answers that request (InResponseTo);
+// any other callback is refused and leaves the attempt as it is. The attempt stays
+// reserved until its callback has handed the VPN session over, so no new attempt can
+// replace that session meanwhile. This only routes callbacks: the VPN server still
+// checks the SAML response itself.
 
 // signIn is one sign-in attempt; m.signIn holds the one under way.
 type signIn struct {
-	p   *profile
-	url string // the identity provider page; empty while the attempt starts
-	at  time.Time
+	p         *profile
+	url       string // the identity provider page; empty while the attempt starts
+	requestID string // ID of the SAML AuthnRequest in url
+	claimed   bool   // its callback arrived and is handing the session over
+	at        time.Time
 }
 
 // An unfinished sign-in ends after this time. A variable for tests.
 var signInTimeout = 5 * time.Minute
 
+// handleSAML hands a SAML result to its profile. A variable for tests.
+var handleSAML = (*profile).handleSAML
+
 // signingIn returns the sign-in under way, or nil. m.mu held.
 func (m *manager) signingIn() *signIn {
-	if a := m.signIn; a != nil && time.Since(a.at) <= signInTimeout {
+	if a := m.signIn; a != nil && (a.claimed || time.Since(a.at) <= signInTimeout) {
 		return a
 	}
 	return nil
@@ -50,11 +66,12 @@ func (m *manager) end(a *signIn) {
 	}
 }
 
+// endSignIn cancels the sign-in of p, unless its callback is handing over.
 func (m *manager) endSignIn(p *profile) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.signIn != nil && m.signIn.p == p {
-		m.end(m.signIn)
+	if a := m.signIn; a != nil && a.p == p && !a.claimed {
+		m.end(a)
 	}
 }
 
@@ -72,41 +89,135 @@ func (m *manager) connect(h func(*profile, http.ResponseWriter, *http.Request)) 
 		m.changed()
 		m.mu.Unlock()
 
-		cw := &catchWriter{ResponseWriter: w}
-		h(p, cw, r)
+		hw := &holdWriter{header: w.Header()}
+		h(p, hw, r)
+		loc := w.Header().Get("Location")
+		id, idErr := requestID(loc)
 
 		m.mu.Lock()
-		if cw.code == http.StatusFound && m.signIn == a {
-			a.url, a.at = w.Header().Get("Location"), time.Now()
+		ok := hw.code == http.StatusFound && idErr == nil && m.signIn == a
+		if ok {
+			a.url, a.requestID, a.at = loc, id, time.Now()
 			m.changed()
 			time.AfterFunc(signInTimeout, func() {
 				m.mu.Lock()
-				m.end(a)
+				if !a.claimed {
+					m.end(a)
+				}
 				m.mu.Unlock()
 			})
 		} else {
 			m.end(a)
 		}
 		m.mu.Unlock()
-		if cw.code >= 400 {
-			msg, detail := connectError(cw.body.String())
+
+		switch {
+		case ok:
+			w.WriteHeader(http.StatusFound) // to the identity provider
+		case hw.code >= 400:
+			msg, detail := connectError(hw.body.String())
 			m.fail(w, "Could not connect", msg, detail)
+		case idErr != nil:
+			log.Printf("%s: sign-in URL: %v", p.name, idErr)
+			m.fail(w, "Could not connect", "The VPN server's sign-in request could not be read, so its result could not be matched to this profile.", idErr.Error())
+		default:
+			m.fail(w, "Could not connect", "The sign-in was canceled while it started.", "")
 		}
 	}
 }
 
-// handleCallback takes the SAML result the identity provider posts to /, for the
-// sign-in under way.
+// handleCallback takes the SAML result the identity provider posts to /. Only the
+// result of the sign-in under way is taken, once.
 func (m *manager) handleCallback(w http.ResponseWriter, r *http.Request) {
+	inResponseTo, err := responseTo(r.PostFormValue("SAMLResponse"))
 	m.mu.Lock()
 	a := m.signingIn()
-	m.end(a)
+	match := err == nil && a != nil && !a.claimed && a.requestID != "" && inResponseTo == a.requestID
+	if match {
+		a.claimed = true
+	}
 	m.mu.Unlock()
-	if a == nil {
-		m.fail(w, "Sign-in not accepted", "No AWS sign-in is open: it was canceled, it timed out, or it already finished. Connect again from the dashboard.", "")
+	if !match {
+		if err != nil {
+			log.Printf("SAML callback refused: %v", err)
+		}
+		m.fail(w, "Sign-in not accepted", "This sign-in result does not belong to an open sign-in: it was canceled, it timed out, it already finished, or it was not a valid result. Connect again from the dashboard.", "")
 		return
 	}
-	a.p.handleSAML(w, r)
+	handleSAML(a.p, w, r)
+	m.mu.Lock()
+	m.end(a)
+	m.mu.Unlock()
+}
+
+// requestID reads the ID of the SAML AuthnRequest in an identity provider URL
+// (HTTP-Redirect binding: base64 of raw DEFLATE).
+func requestID(loc string) (string, error) {
+	u, err := url.Parse(loc)
+	if err != nil {
+		return "", err
+	}
+	raw, err := base64.StdEncoding.DecodeString(u.Query().Get("SAMLRequest"))
+	if err != nil || len(raw) == 0 {
+		return "", fmt.Errorf("no SAMLRequest in the sign-in URL")
+	}
+	x, err := io.ReadAll(io.LimitReader(flate.NewReader(bytes.NewReader(raw)), 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("SAMLRequest: %v", err)
+	}
+	return rootAttr(x, "AuthnRequest", "ID")
+}
+
+// responseTo reads InResponseTo of a SAML Response posted by the identity provider
+// (HTTP-POST binding: base64).
+func responseTo(samlResponse string) (string, error) {
+	x, err := base64.StdEncoding.DecodeString(samlResponse)
+	if err != nil || len(x) == 0 {
+		return "", fmt.Errorf("SAMLResponse missing or not base64")
+	}
+	return rootAttr(x, "Response", "InResponseTo")
+}
+
+// rootAttr returns attribute attr of the root element, which must be elem.
+func rootAttr(x []byte, elem, attr string) (string, error) {
+	d := xml.NewDecoder(bytes.NewReader(x))
+	for {
+		t, err := d.Token()
+		if err != nil {
+			return "", fmt.Errorf("%s: %v", elem, err)
+		}
+		if se, ok := t.(xml.StartElement); ok {
+			if se.Name.Local != elem {
+				return "", fmt.Errorf("root is %s, want %s", se.Name.Local, elem)
+			}
+			for _, a := range se.Attr {
+				if a.Name.Local == attr && a.Value != "" {
+					return a.Value, nil
+				}
+			}
+			return "", fmt.Errorf("%s has no %s", elem, attr)
+		}
+	}
+}
+
+// holdWriter keeps a handler's response: connect decides what to send.
+type holdWriter struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (h *holdWriter) Header() http.Header { return h.header }
+
+func (h *holdWriter) WriteHeader(code int) {
+	if h.code == 0 {
+		h.code = code
+	}
+}
+
+func (h *holdWriter) Write(b []byte) (int, error) {
+	h.WriteHeader(http.StatusOK)
+	return h.body.Write(b)
 }
 
 // handleVersion streams the dashboard version: an open page refreshes when it changes.

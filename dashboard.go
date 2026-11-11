@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"html/template"
 	"net"
@@ -111,30 +110,6 @@ func (m *manager) withProfile(h func(*profile, http.ResponseWriter, *http.Reques
 		}
 		h(p, w, r)
 	}
-}
-
-// catchWriter passes a response through, except an error, which it keeps.
-type catchWriter struct {
-	http.ResponseWriter
-	code int
-	body bytes.Buffer
-}
-
-func (c *catchWriter) WriteHeader(code int) {
-	c.code = code
-	if code < 400 {
-		c.ResponseWriter.WriteHeader(code)
-	}
-}
-
-func (c *catchWriter) Write(b []byte) (int, error) {
-	if c.code == 0 {
-		c.WriteHeader(http.StatusOK)
-	}
-	if c.code >= 400 {
-		return c.body.Write(b)
-	}
-	return c.ResponseWriter.Write(b)
 }
 
 // formView is what a profile form shows: the profile, or what was posted when it was
