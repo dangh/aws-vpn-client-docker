@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AWS VPN</title>
+  {{template "style"}}
+  <style>
+    /* Profile card details */
+    .card-action { display: flex; align-items: center; gap: 4px; margin: 0; }
+    .card-action form { margin: 0; }
+    .card-header { align-items: center; }
+    .rows { display: grid; grid-template-columns: 72px 1fr; gap: 14px 16px; align-items: center; }
+    .rows > dt { color: var(--muted-foreground); font-size: 13px; }
+    .rows > dd { margin: 0; min-width: 0; }
+    .rows .proxy input { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    @media (max-width: 560px) {
+      .rows { grid-template-columns: 1fr; gap: 6px; }
+      .rows > dd + dt { margin-top: 10px; }
+      .card-header { grid-template-columns: 1fr; }
+      .card-action { grid-column: 1; grid-row: 3; justify-self: stretch; margin-top: 10px; }
+      .card-action > form, .card-action > .btn-default { flex: 1; }
+      .card-action > form .btn { width: 100%; }
+    }
+
+    /* Dialog and AlertDialog (native <dialog>) */
+    dialog.dialog { width: calc(100% - 32px); max-width: 480px; max-height: calc(100% - 32px); margin: auto; padding: 24px;
+      overflow: auto; background: var(--background); color: var(--foreground); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1); }
+    dialog.dialog[open] { display: flex; flex-direction: column; gap: 20px; animation: zoom-in .15s ease-out; }
+    dialog.dialog::backdrop { background: rgb(0 0 0 / .5); animation: fade-in .15s ease-out; }
+    .dialog-header { display: flex; flex-direction: column; gap: 6px; padding-right: 24px; }
+    .dialog-title { font-size: 18px; font-weight: 600; line-height: 1.2; }
+    .dialog-description { color: var(--muted-foreground); }
+    .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap-reverse; }
+    .dialog-close { position: absolute; top: 14px; right: 14px; opacity: .7; }
+    .dialog-close:hover { opacity: 1; }
+    dialog.dialog form { display: contents; }
+    @keyframes zoom-in { from { opacity: 0; transform: scale(.96); } }
+    @keyframes fade-in { from { opacity: 0; } }
+    @media (max-width: 560px) { .dialog-footer .btn { flex: 1; } }
+
+    /* DropdownMenu (popover API) */
+    .menu { position: fixed; inset: auto; margin: 0; min-width: 176px; padding: 4px; background: var(--popover);
+      color: var(--popover-foreground); border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1), 0 2px 4px -2px rgb(0 0 0 / .1); }
+    .menu:popover-open { display: flex; flex-direction: column; animation: zoom-in .1s ease-out; }
+    .menu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: calc(var(--radius) - 4px);
+      background: none; text-align: left; font-size: 14px; cursor: default; }
+    .menu-item svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+    .menu-item:hover, .menu-item:focus-visible { background: var(--accent); color: var(--accent-foreground); }
+    .menu-item.destructive, .menu-item.destructive svg { color: var(--destructive); }
+    .menu-item.destructive:hover, .menu-item.destructive:focus-visible { background: color-mix(in oklab, var(--destructive) 10%, transparent); }
+    .menu-separator { height: 1px; margin: 4px -4px; background: var(--border); }
+
+    /* Empty */
+    .empty { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 48px 24px; text-align: center;
+      border: 1px dashed var(--border); border-radius: calc(var(--radius) + 4px); }
+    .empty-media { display: grid; place-items: center; width: 40px; height: 40px; border-radius: var(--radius); background: var(--muted); }
+    .empty-media svg { width: 20px; height: 20px; }
+    .empty h2 { font-size: 16px; font-weight: 600; }
+    .empty p { color: var(--muted-foreground); max-width: 360px; margin-top: 4px; }
+
+    /* Toast */
+    .toast { position: fixed; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+      background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1); font-weight: 500;
+      transition: opacity .2s, transform .2s, visibility .2s; }
+    .toast svg { width: 16px; height: 16px; color: var(--success); }
+    .toast[hidden] { display: flex; visibility: hidden; opacity: 0; transform: translateY(8px); pointer-events: none; }
+
+    .note { margin-top: 8px; }
+    .note code { white-space: nowrap; }
+  </style>
+</head>
+<body>
+<main>
+  <header class="page-head">
+    <div>
+      <h1>AWS VPN</h1>
+      <p>{{if .Profiles}}{{.Connected}} of {{len .Profiles}} profile{{if ne (len .Profiles) 1}}s{{end}} connected{{else}}No profiles yet{{end}}</p>
+    </div>
+    {{if .Profiles}}<button class="btn btn-default" type="button" data-dialog="add">{{icon "plus"}}Add profile</button>{{end}}
+  </header>
+
+  {{range .Profiles}}
+  <article class="card" data-profile="{{.ID}}" data-status="{{.Status}}" aria-labelledby="title-{{.ID}}">
+    <div class="card-header">
+      <h2 class="card-title" id="title-{{.ID}}">{{.Name}}
+        <span class="badge" role="status"><span class="dot"></span><span data-status-text>{{.StatusText}}</span></span>
+      </h2>
+      <p class="card-description">
+        {{- if eq .Status "connected"}}Traffic to {{len .Domains}} domain{{if ne (len .Domains) 1}}s{{end}} goes through this VPN.
+        {{- else if eq .Status "connecting"}}Starting the VPN connection.
+        {{- else if .HasProfile}}Connect uses the saved .ovpn file.
+        {{- else}}Upload the .ovpn file from the AWS VPN self-service portal to connect.{{end -}}
+      </p>
+      <div class="card-action">
+      <form method="POST" action="/p/{{.ID}}/upload" enctype="multipart/form-data" hidden>
+        <input type="file" name="ovpn" accept=".ovpn" id="ovpn-{{.ID}}">
+      </form>
+      {{if .Running}}
+        <form method="POST" action="/p/{{.ID}}/disconnect"><button class="btn btn-outline">{{icon "power"}}Disconnect</button></form>
+      {{else if .HasProfile}}
+        <form method="POST" action="/p/{{.ID}}/reconnect"><button class="btn btn-default">{{icon "plug-zap"}}Connect</button></form>
+      {{else}}
+        <button class="btn btn-default" type="button" data-pick="ovpn-{{.ID}}">{{icon "upload"}}Upload .ovpn</button>
+      {{end}}
+        <button class="btn btn-ghost btn-icon" type="button" popovertarget="menu-{{.ID}}" aria-haspopup="menu" aria-label="Actions for {{.Name}}">{{icon "ellipsis"}}</button>
+        <div class="menu" id="menu-{{.ID}}" popover role="menu">
+          <button class="menu-item" type="button" role="menuitem" data-dialog="edit-{{.ID}}">{{icon "pencil"}}Edit profile</button>
+          {{if .HasProfile}}<button class="menu-item" type="button" role="menuitem" data-pick="ovpn-{{.ID}}">{{icon "upload"}}Replace .ovpn file</button>{{end}}
+          <div class="menu-separator" role="separator"></div>
+          <button class="menu-item destructive" type="button" role="menuitem" data-dialog="delete-{{.ID}}">{{icon "trash-2"}}Delete profile</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-content">
+      {{if .LoginURL}}
+      <div class="alert alert-warning" role="alert">
+        {{icon "triangle-alert"}}
+        <p class="alert-title">Tailnet node not logged in</p>
+        <p class="alert-description">The proxy is not on the tailnet until <span class="mono">{{.Hostname}}</span> is logged in to Tailscale. Reload this page after you log in.</p>
+        <div class="alert-actions"><a class="btn btn-outline btn-sm" href="{{.LoginURL}}" target="_blank" rel="noopener">{{icon "log-in"}}Log in to Tailscale</a></div>
+      </div>
+      {{end}}
+      {{if .PendingAuth}}
+      <div class="alert" role="status">
+        {{icon "info"}}
+        <p class="alert-title">SAML login in progress</p>
+        <p class="alert-description">Finish the login in your browser. Keep the SSH tunnel to port 35001 open.</p>
+        <div class="alert-actions"><a class="btn btn-outline btn-sm" href="/p/{{.ID}}/login">{{icon "log-in"}}Continue login</a></div>
+      </div>
+      {{end}}
+      <dl class="rows">
+        <dt>Proxy</dt>
+        <dd>
+          <div class="input-group proxy">
+            <input type="text" readonly value="http://{{.Host}}" aria-label="Proxy address" data-select>
+            <span class="input-group-addon"><button class="btn btn-ghost btn-xs" type="button" data-copy="http://{{.Host}}" aria-label="Copy proxy address">{{icon "copy"}}</button></span>
+          </div>
+        </dd>
+        <dt>Domains</dt>
+        <dd class="badges">{{range .Domains}}<span class="badge badge-mono">{{.}}</span>{{end}}</dd>
+      </dl>
+    </div>
+
+
+    <dialog class="dialog" id="edit-{{.ID}}" aria-labelledby="edit-title-{{.ID}}">
+      <form method="POST" action="/p/{{.ID}}/edit">
+        <div class="dialog-header">
+          <h2 class="dialog-title" id="edit-title-{{.ID}}">Edit profile</h2>
+          <p class="dialog-description">A new hostname or domain list restarts every proxy for a few seconds. VPN sessions stay up.</p>
+        </div>
+        {{template "fields" dict "Name" .Name "Hostname" .Hostname "Domains" .DomainsText "Tailnet" $.Tailnet "ID" .ID}}
+        <div class="dialog-footer">
+          <button class="btn btn-outline" type="button" data-close>Cancel</button>
+          <button class="btn btn-default">Save changes</button>
+        </div>
+      </form>
+      <button class="btn btn-ghost btn-xs dialog-close" type="button" data-close aria-label="Close">{{icon "x"}}</button>
+    </dialog>
+
+    <dialog class="dialog" id="delete-{{.ID}}" role="alertdialog" aria-labelledby="delete-title-{{.ID}}">
+      <form method="POST" action="/p/{{.ID}}/delete">
+        <div class="dialog-header">
+          <h2 class="dialog-title" id="delete-title-{{.ID}}">Delete {{.Name}}?</h2>
+          <p class="dialog-description">Its VPN disconnects and its data moves to <code>/data/.trash</code>. The tailnet node <span class="mono">{{.Hostname}}</span> stays in the Tailscale admin console, offline, until you remove it there.</p>
+        </div>
+        <div class="dialog-footer">
+          <button class="btn btn-outline" type="button" data-close autofocus>Cancel</button>
+          <button class="btn btn-destructive">Delete profile</button>
+        </div>
+      </form>
+    </dialog>
+  </article>
+  {{else}}
+  <section class="empty">
+    <div class="empty-media">{{icon "shield-check"}}</div>
+    <div>
+      <h2>No VPN profiles</h2>
+      <p>Each profile is one AWS VPN connection with its own proxy on the tailnet.</p>
+    </div>
+    <button class="btn btn-default" type="button" data-dialog="add">{{icon "plus"}}Add profile</button>
+  </section>
+  {{end}}
+
+  <div class="alert note">
+    {{icon "info"}}
+    <p class="alert-title">Log in one profile at a time</p>
+    <p class="alert-description">AWS sends the SAML result to <code>http://127.0.0.1:35001</code> on your computer. Keep <code>ssh -N -L 35001:localhost:35001</code> to the VPN host open while you log in.</p>
+  </div>
+</main>
+
+<dialog class="dialog" id="add" aria-labelledby="add-title">
+  <form method="POST" action="/add">
+    <div class="dialog-header">
+      <h2 class="dialog-title" id="add-title">Add profile</h2>
+      <p class="dialog-description">The new tailnet node shows a Tailscale login link on its card.</p>
+    </div>
+    {{template "fields" dict "Name" "" "Hostname" "" "Domains" .Domains "Tailnet" .Tailnet "ID" "new"}}
+    <div class="dialog-footer">
+      <button class="btn btn-outline" type="button" data-close>Cancel</button>
+      <button class="btn btn-default">Add profile</button>
+    </div>
+  </form>
+  <button class="btn btn-ghost btn-xs dialog-close" type="button" data-close aria-label="Close">{{icon "x"}}</button>
+</dialog>
+
+<template id="spinner"><span class="spin" style="display:flex">{{icon "loader-circle"}}</span></template>
+<div class="toast" role="status" aria-live="polite" hidden>{{icon "check"}}<span>Copied to clipboard</span></div>
+
+<script>
+  const $$ = (s, el = document) => el.querySelectorAll(s);
+
+  // Dialogs: open, close on Cancel, the X or a click on the backdrop.
+  $$('[data-dialog]').forEach(b => b.addEventListener('click', () => {
+    b.closest('[popover]')?.hidePopover();
+    document.getElementById(b.dataset.dialog).showModal();
+  }));
+  $$('dialog').forEach(d => {
+    d.addEventListener('click', e => { if (e.target === d) d.close(); });
+    $$('[data-close]', d).forEach(b => b.addEventListener('click', () => d.close()));
+    d.addEventListener('close', () => { d.querySelector('form')?.reset(); if (reloadWanted) location.reload(); });
+  });
+
+  // Dropdown menus: place under the trigger, right-aligned; arrow keys move between items.
+  $$('.menu').forEach(menu => {
+    const trigger = document.querySelector(`[popovertarget="${menu.id}"]`);
+    menu.addEventListener('toggle', e => {
+      trigger.setAttribute('aria-expanded', e.newState === 'open');
+      if (e.newState !== 'open') return;
+      const r = trigger.getBoundingClientRect();
+      menu.style.top = `${r.bottom + 4}px`;
+      menu.style.left = `${Math.max(8, r.right - menu.offsetWidth)}px`;
+      menu.querySelector('.menu-item').focus();
+    });
+    menu.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      e.preventDefault();
+      const items = [...$$('.menu-item', menu)];
+      const i = items.indexOf(document.activeElement) + (e.key === 'ArrowDown' ? 1 : -1);
+      items[(i + items.length) % items.length].focus();
+    });
+  });
+
+  // Busy state: a submitted form's button shows a spinner and cannot be clicked twice.
+  const spinner = document.getElementById('spinner').content;
+  function busy(btn) {
+    if (!btn) return;
+    btn.querySelector('svg')?.remove();
+    btn.prepend(spinner.cloneNode(true));
+    btn.setAttribute('aria-disabled', 'true');
+  }
+  $$('form').forEach(f => f.addEventListener('submit', e => busy(e.submitter)));
+
+  // .ovpn upload: the button opens the file picker; choosing a file uploads it.
+  $$('[data-pick]').forEach(b => b.addEventListener('click', () => {
+    b.closest('[popover]')?.hidePopover();
+    const input = document.getElementById(b.dataset.pick);
+    input.onchange = () => { busy(document.querySelector(`.card-action > [data-pick="${input.id}"]`)); input.form.submit(); };
+    input.click();
+  }));
+
+  // Copy the proxy address. navigator.clipboard needs a secure context (not plain http on the tailnet).
+  const toast = document.querySelector('.toast');
+  let toastTimer;
+  $$('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); }
+    catch { const t = document.createElement('textarea'); t.value = b.dataset.copy; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
+    toast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.hidden = true, 1800);
+  }));
+  $$('[data-select]').forEach(i => i.addEventListener('focus', () => i.select()));
+
+  // Live status. The buttons depend on the status: reload when it changes, after any open dialog closes.
+  let reloadWanted = false;
+  addEventListener('load', () => $$('[data-profile]').forEach(card => {
+    const text = card.querySelector('[data-status-text]');
+    const es = new EventSource(`/p/${card.dataset.profile}/events`);
+    es.onmessage = ({ data }) => {
+      const { status, message } = JSON.parse(data);
+      text.textContent = message;
+      if (status === card.dataset.status) return;
+      card.dataset.status = status;
+      reloadWanted = true;
+      if (!document.querySelector('dialog[open]')) setTimeout(() => location.reload(), 300);
+    };
+    es.onerror = () => { card.dataset.status = 'error'; text.textContent = 'Not reachable'; };
+  }));
+</script>
+</body>
+</html>
+
+{{define "fields"}}
+<div class="field-group">
+  <div class="field">
+    <label class="label" for="name-{{.ID}}">Name</label>
+    <input class="input" id="name-{{.ID}}" type="text" name="name" value="{{.Name}}" maxlength="40" required placeholder="Corp" autocomplete="off">
+  </div>
+  <div class="field">
+    <label class="label" for="hostname-{{.ID}}">Tailnet hostname</label>
+    <div class="input-group">
+      <input id="hostname-{{.ID}}" type="text" name="hostname" value="{{.Hostname}}" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="corp-proxy" autocomplete="off" spellcheck="false" aria-describedby="hostname-desc-{{.ID}}">
+      {{if .Tailnet}}<span class="input-group-addon text mono">.{{.Tailnet}}</span>{{end}}
+    </div>
+    <p class="field-description" id="hostname-desc-{{.ID}}">Lowercase letters, digits and dashes. The proxy's address on the tailnet.</p>
+  </div>
+  <div class="field">
+    <label class="label" for="domains-{{.ID}}">Domains</label>
+    <textarea class="textarea mono" id="domains-{{.ID}}" name="domains" rows="5" required spellcheck="false" aria-describedby="domains-desc-{{.ID}}">{{.Domains}}</textarea>
+    <p class="field-description" id="domains-desc-{{.ID}}">One per line. <code>.example.com</code> matches every subdomain of example.com. Other traffic goes direct.</p>
+  </div>
+</div>
+{{end}}

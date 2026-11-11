@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Not saved · AWS VPN</title>
+  {{template "style"}}
+</head>
+<body>
+<main>
+  <header class="page-head"><div><h1>AWS VPN</h1></div></header>
+  <div class="alert alert-destructive" role="alert">
+    {{icon "triangle-alert"}}
+    <p class="alert-title">Not saved</p>
+    <p class="alert-description">{{.}}</p>
+  </div>
+  <div><a class="btn btn-outline" href="/" onclick="if (history.length > 1) { history.back(); return false; }">Back to the dashboard</a></div>
+</main>
+</body>
+</html>

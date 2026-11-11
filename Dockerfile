@@ -25,6 +25,7 @@ ARG OPTIMIZE=false
 WORKDIR /opt/go-server
 
 COPY *.go ./
+COPY ui/ ./ui/
 
 RUN go mod init server \
     && if [ "$OPTIMIZE" = "true" ]; then \

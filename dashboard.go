@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"html/template"
 	"net"
 	"net/http"
@@ -103,7 +104,7 @@ func (m *manager) withProfile(h func(*profile, http.ResponseWriter, *http.Reques
 func (m *manager) done(w http.ResponseWriter, r *http.Request, err error) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		errorTmpl.Execute(w, err.Error())
+		pages.ExecuteTemplate(w, "error.html", err.Error())
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -153,225 +154,40 @@ func (m *manager) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}{views, connected, m.st.Tailnet, strings.Join(m.st.Domains, "\n")}
 	m.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	dashboardTmpl.Execute(w, data)
+	pages.ExecuteTemplate(w, "dashboard.html", data)
 }
 
-// Shared look of the dashboard and the error page.
-const pageStyle = `
-  :root {
-    --bg: #f6f7f9; --card: #fff; --text: #1c1e21; --muted: #65676b; --line: #e3e5e8;
-    --accent: #2563eb; --accent-text: #fff; --soft: #eef2ff;
-    --ok: #16a34a; --ok-bg: #e8f6ed; --warn: #b45309; --warn-bg: #fef6e7;
-    --bad: #dc2626; --bad-bg: #fdecec; --idle: #8a8d91; --idle-bg: #f0f1f3;
-    --info: #1d4ed8; --info-bg: #eaf1fe;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #111315; --card: #1b1e21; --text: #e6e7e9; --muted: #9a9ea4; --line: #2c3035;
-      --accent: #4f8bff; --accent-text: #fff; --soft: #1e2a44;
-      --ok: #34d399; --ok-bg: #12291f; --warn: #fbbf24; --warn-bg: #2d2412;
-      --bad: #f87171; --bad-bg: #2f1717; --idle: #8a8f96; --idle-bg: #23272b;
-      --info: #93b4ff; --info-bg: #1a2540;
-    }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
-  a { color: var(--accent); }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
-  .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
-    background: var(--card); color: var(--text); border-radius: 8px; padding: 7px 14px;
-    font: inherit; font-weight: 600; cursor: pointer; text-decoration: none; }
-  .btn:hover { border-color: var(--muted); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-  .btn.primary:hover { filter: brightness(1.08); }
-  .btn.danger { color: var(--bad); }
-  .btn.danger.solid { background: var(--bad); border-color: var(--bad); color: #fff; }
-  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
-  .btn.ghost:hover { color: var(--text); }
-  .banner { border-radius: 8px; padding: 10px 14px; margin: 12px 0 0; }
-  .banner.warn { background: var(--warn-bg); color: var(--warn); }
-  .banner.info { background: var(--info-bg); color: var(--info); }
-  .banner.bad { background: var(--bad-bg); color: var(--bad); }
-  .banner a { color: inherit; font-weight: 700; }
-`
+//go:embed ui/*.html
+var uiFiles embed.FS
 
-var errorTmpl = template.Must(template.New("error").Parse(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AWS VPN</title><style>` + pageStyle + `</style></head>
-<body><main><h1>AWS VPN</h1>
-<p class="banner bad"><b>Not saved.</b> {{.}}</p>
-<p><a class="btn" href="/">Back to the dashboard</a></p></main></body></html>`))
+var pages = template.Must(template.New("").Funcs(template.FuncMap{
+	"icon": func(name string) template.HTML {
+		return template.HTML(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` + icons[name] + `</svg>`)
+	},
+	"dict": func(kv ...any) map[string]any {
+		m := map[string]any{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	},
+}).ParseFS(uiFiles, "ui/*.html"))
 
-var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AWS VPN</title>
-  <style>` + pageStyle + `
-    header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
-    header h1 { margin: 0; font-size: 1.6em; }
-    header .sub { color: var(--muted); }
-    header .grow { flex: 1; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-      border-left-width: 4px; padding: 18px 20px; margin-bottom: 16px; }
-    .card.connected { border-left-color: var(--ok); }
-    .top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .top h2 { margin: 0; font-size: 1.15em; }
-    .top .grow { flex: 1; }
-    .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
-      padding: 2px 10px; font-size: 0.85em; font-weight: 700; }
-    .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-    .pill.connected { background: var(--ok-bg); color: var(--ok); }
-    .pill.connecting { background: var(--warn-bg); color: var(--warn); }
-    .pill.connecting::before { animation: pulse 1s infinite; }
-    .pill.idle, .pill.disconnected { background: var(--idle-bg); color: var(--idle); }
-    .pill.error { background: var(--bad-bg); color: var(--bad); }
-    @keyframes pulse { 50% { opacity: 0.3; } }
-    dl { display: grid; grid-template-columns: 90px 1fr; gap: 6px 12px; margin: 14px 0 0; }
-    dt { color: var(--muted); }
-    dd { margin: 0; min-width: 0; }
-    .copy { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; }
-    .copy code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .copy button { border: none; background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.85em; padding: 0; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { background: var(--soft); border-radius: 6px; padding: 1px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 0.82em; }
-    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
-    .actions form { margin: 0; }
-    .actions .grow { flex: 1; }
-    .panel { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
-    .panel[hidden] { display: none; }
-    label { display: block; font-weight: 600; margin: 12px 0 4px; }
-    label:first-child { margin-top: 0; }
-    .hint { color: var(--muted); font-size: 0.85em; font-weight: normal; }
-    input[type=text], textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px;
-      padding: 8px 10px; font: inherit; background: var(--bg); color: var(--text); }
-    textarea { font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; resize: vertical; }
-    input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-    .suffix { display: flex; align-items: center; gap: 6px; }
-    .suffix input { flex: 1; }
-    .suffix span { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
-    .danger-zone { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-      margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--line); }
-    .danger-zone p { margin: 0; flex: 1; color: var(--muted); font-size: 0.85em; min-width: 200px; }
-    .empty { text-align: center; color: var(--muted); padding: 32px 20px; }
-    footer { color: var(--muted); font-size: 0.85em; margin-top: 28px; }
-    @media (max-width: 520px) { dl { grid-template-columns: 1fr; gap: 0 0; } dt { margin-top: 6px; } }
-  </style>
-</head>
-<body>
-<main>
-  <header>
-    <div class="grow">
-      <h1>AWS VPN</h1>
-      <div class="sub">{{len .Profiles}} profile{{if ne (len .Profiles) 1}}s{{end}} · {{.Connected}} connected</div>
-    </div>
-    <button class="btn primary" type="button" onclick="toggle('add')">+ Add profile</button>
-  </header>
-
-  <section class="card panel-card" id="add" {{if .Profiles}}hidden{{end}}>
-    <h2 style="margin: 0 0 12px; font-size: 1.15em">New profile</h2>
-    <form method="POST" action="/add">
-      <label>Name</label>
-      <input type="text" name="name" maxlength="40" required placeholder="e.g. Corp">
-      <label>Tailnet hostname <span class="hint">· the proxy's address on the tailnet</span></label>
-      <div class="suffix"><input type="text" name="hostname" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="corp-proxy">{{if .Tailnet}}<span>.{{.Tailnet}}</span>{{end}}</div>
-      <label>Domains through this VPN <span class="hint">· one per line; <code>.example.com</code> = every subdomain</span></label>
-      <textarea name="domains" rows="5" required>{{.Domains}}</textarea>
-      <div class="row">
-        <button class="btn primary">Add profile</button>
-        {{if .Profiles}}<button class="btn ghost" type="button" onclick="toggle('add')">Cancel</button>{{end}}
-        <span class="hint">The new node shows a Tailscale login link here.</span>
-      </div>
-    </form>
-  </section>
-
-  {{range .Profiles}}
-  <section class="card {{.Status}}" data-profile="{{.ID}}" data-status="{{.Status}}">
-    <div class="top">
-      <h2>{{.Name}}</h2>
-      <span class="pill {{.Status}}" data-pill>{{.StatusText}}</span>
-      <span class="grow"></span>
-      <button class="btn ghost" type="button" onclick="toggle('edit-{{.ID}}')">Edit</button>
-    </div>
-
-    {{if .LoginURL}}<p class="banner warn">Tailnet node <b>{{.Hostname}}</b> is not logged in. <a href="{{.LoginURL}}" target="_blank" rel="noopener">Log it in to Tailscale →</a> then reload this page.</p>{{end}}
-    {{if .PendingAuth}}<p class="banner info">SAML login started. <a href="/p/{{.ID}}/login">Continue the login →</a></p>{{end}}
-
-    <dl>
-      <dt>Proxy</dt>
-      <dd class="copy"><code>http://{{.Host}}</code><button type="button" data-copy="http://{{.Host}}">Copy</button></dd>
-      <dt>Domains</dt>
-      <dd class="chips">{{range .Domains}}<span class="chip">{{.}}</span>{{end}}</dd>
-    </dl>
-
-    <div class="actions">
-      {{if .Running}}
-        <form method="POST" action="/p/{{.ID}}/disconnect"><button class="btn danger">Disconnect</button></form>
-      {{else if .HasProfile}}
-        <form method="POST" action="/p/{{.ID}}/reconnect"><button class="btn primary">Connect</button></form>
-        <form method="POST" action="/p/{{.ID}}/upload" enctype="multipart/form-data">
-          <label class="btn ghost" style="margin: 0">Use another .ovpn<input type="file" name="ovpn" accept=".ovpn" hidden onchange="this.form.submit()"></label>
-        </form>
-      {{else}}
-        <form method="POST" action="/p/{{.ID}}/upload" enctype="multipart/form-data">
-          <label class="btn primary" style="margin: 0">Upload .ovpn to connect<input type="file" name="ovpn" accept=".ovpn" hidden onchange="this.form.submit()"></label>
-        </form>
-      {{end}}
-    </div>
-
-    <div class="panel" id="edit-{{.ID}}" hidden>
-      <form method="POST" action="/p/{{.ID}}/edit">
-        <label>Name</label>
-        <input type="text" name="name" value="{{.Name}}" maxlength="40" required>
-        <label>Tailnet hostname</label>
-        <div class="suffix"><input type="text" name="hostname" value="{{.Hostname}}" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?">{{if $.Tailnet}}<span>.{{$.Tailnet}}</span>{{end}}</div>
-        <label>Domains through this VPN <span class="hint">· one per line; <code>.example.com</code> = every subdomain</span></label>
-        <textarea name="domains" rows="5" required>{{.DomainsText}}</textarea>
-        <div class="row">
-          <button class="btn primary">Save</button>
-          <button class="btn ghost" type="button" onclick="toggle('edit-{{.ID}}')">Cancel</button>
-          <span class="hint">A new hostname or domains restart every proxy for a few seconds; VPN sessions stay up.</span>
-        </div>
-      </form>
-      <form class="danger-zone" method="POST" action="/p/{{.ID}}/delete" onsubmit="return confirm('Delete ' + {{.Name}} + '? Its VPN disconnects. Its data moves to /data/.trash.')">
-        <p>Delete this profile. Its tailnet node stays in the Tailscale admin console, offline, until you remove it there.</p>
-        <button class="btn danger">Delete profile</button>
-      </form>
-    </div>
-  </section>
-  {{else}}
-  <section class="card empty">No profiles yet. Add one above.</section>
-  {{end}}
-
-  <footer>Log in one profile at a time. AWS sends the SAML result to <code>http://127.0.0.1:35001</code> on your computer: keep <code>ssh -N -L 35001:localhost:35001</code> to the VPN host open while you log in.</footer>
-</main>
-<script>
-  function toggle(id) {
-    const el = document.getElementById(id);
-    el.hidden = !el.hidden;
-    if (!el.hidden) el.querySelector('input, textarea')?.focus();
-  }
-  document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
-    const t = document.createElement('textarea');
-    t.value = b.dataset.copy; document.body.appendChild(t); t.select();
-    document.execCommand('copy'); t.remove();
-    b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500);
-  }));
-  // Live status. The buttons depend on the status: reload when it changes.
-  document.querySelectorAll('[data-profile]').forEach(card => {
-    const pill = card.querySelector('[data-pill]');
-    const es = new EventSource('/p/' + card.dataset.profile + '/events');
-    es.onmessage = ({ data }) => {
-      const { status, message } = JSON.parse(data);
-      pill.className = 'pill ' + status; pill.textContent = message;
-      if (status !== card.dataset.status) setTimeout(() => location.reload(), 400);
-    };
-    es.onerror = () => { pill.className = 'pill error'; pill.textContent = 'Not reachable'; };
-  });
-</script>
-</body>
-</html>`))
+// Lucide icons (lucide-static 0.468.0, ISC license): the inner SVG markup.
+var icons = map[string]string{
+	"check":          `<path d="M20 6 9 17l-5-5"/>`,
+	"copy":           `<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>`,
+	"ellipsis":       `<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`,
+	"info":           `<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>`,
+	"loader-circle":  `<path d="M21 12a9 9 0 1 1-6.219-8.56"/>`,
+	"log-in":         `<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/>`,
+	"pencil":         `<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>`,
+	"plug-zap":       `<path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/><path d="m2 22 3-3"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m18 3-4 4h6l-4 4"/>`,
+	"plus":           `<path d="M5 12h14"/><path d="M12 5v14"/>`,
+	"power":          `<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>`,
+	"shield-check":   `<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>`,
+	"trash-2":        `<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>`,
+	"triangle-alert": `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>`,
+	"upload":         `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>`,
+	"x":              `<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`,
+}
