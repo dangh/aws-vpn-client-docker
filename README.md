@@ -92,7 +92,7 @@ for a few seconds; VPN sessions stay up.
 - VPN domains resolve through the DNS server the VPN pushed; everything else through
   the container's resolver.
 - The proxy never reaches the container's loopback or link-local addresses, and its
-  direct path never reaches private networks. The dashboard refuses cross-site POSTs.
+  direct path never reaches private networks. The dashboard answers only its own host names (localhost, 127.0.0.1, the nodes) and refuses POSTs without its own Origin.
 - Port 35001 takes the SAML callback for whichever profile began auth last: log in one
   profile at a time.
 

@@ -2,8 +2,10 @@ package main
 
 import (
 	"html/template"
+	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -46,22 +48,42 @@ func (m *manager) handler() http.Handler {
 	mux.HandleFunc("POST /p/{id}/delete", func(w http.ResponseWriter, r *http.Request) {
 		m.done(w, r, m.deleteProfile(r.PathValue("id")))
 	})
-	return sameOrigin(mux)
+	return m.guard(mux)
 }
 
-// sameOrigin refuses a POST that another site's page sent (the browser says so in
-// Origin), except the SAML result, which the identity provider's page posts to /.
-func sameOrigin(next http.Handler) http.Handler {
+// guard serves only requests to this dashboard's own names (no DNS rebinding), and
+// refuses a POST that another site's page sent: it must carry its own Origin. The
+// SAML result is the exception, which the identity provider's page posts to /.
+func (m *manager) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !m.ownHost(r.Host) {
+			http.Error(w, "unknown host name", http.StatusForbidden)
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path != "/" {
-			if o := r.Header.Get("Origin"); o != "" {
-				if u, err := url.Parse(o); err != nil || u.Host != r.Host {
-					http.Error(w, "cross-site request refused", http.StatusForbidden)
-					return
-				}
+			u, err := url.Parse(r.Header.Get("Origin"))
+			if err != nil || u.Host != r.Host {
+				http.Error(w, "cross-site request refused", http.StatusForbidden)
+				return
 			}
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (m *manager) ownHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.ContainsFunc(m.st.Profiles, func(ps profileState) bool {
+		return host == ps.Hostname || (m.st.Tailnet != "" && host == ps.Hostname+"."+m.st.Tailnet)
 	})
 }
 

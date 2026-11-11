@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -66,5 +68,32 @@ func TestSplitDomains(t *testing.T) {
 	got := splitDomains(".A.com, .b.com\r\n.c.com  .d.com\n")
 	if want := []string{".a.com", ".b.com", ".c.com", ".d.com"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("splitDomains = %v, want %v", got, want)
+	}
+}
+
+func TestGuard(t *testing.T) {
+	m := &manager{st: state{Tailnet: "example.ts.net", Profiles: []profileState{{ID: "corp", Hostname: "corp-proxy"}}}}
+	h := m.guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	for _, c := range []struct {
+		method, host, path, origin string
+		want                       int
+	}{
+		{"GET", "localhost:35001", "/", "", 200},
+		{"GET", "corp-proxy.example.ts.net:8080", "/", "", 200},
+		{"GET", "rebound.evil.example:35001", "/", "", 403},
+		{"POST", "localhost:35001", "/add", "", 403},
+		{"POST", "localhost:35001", "/add", "http://evil.example", 403},
+		{"POST", "localhost:35001", "/add", "http://localhost:35001", 200},
+		{"POST", "127.0.0.1:35001", "/", "https://idp.example", 200}, // SAML result
+	} {
+		r := httptest.NewRequest(c.method, "http://"+c.host+c.path, nil)
+		if c.origin != "" {
+			r.Header.Set("Origin", c.origin)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != c.want {
+			t.Errorf("%s %s%s origin %q: %d, want %d", c.method, c.host, c.path, c.origin, w.Code, c.want)
+		}
 	}
 }
