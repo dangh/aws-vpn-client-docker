@@ -51,36 +51,50 @@ Need only one profile? Delete the `-b` services (and the dispatcher, publishing
 
 ## Profile mode: every profile in one container
 
-Set `AWSVPN_CONFIG` to a JSON file and one container runs every profile in it,
-each as its own tailnet node (embedded in [sing-box](https://sing-box.sagernet.org)):
+One container runs every profile, each as its own tailnet node (embedded in
+[sing-box](https://sing-box.sagernet.org)), managed from a dashboard:
 
-```json
-{
-  "tailnet": "example.ts.net",
-  "domains": [".amazonaws.com", ".aws"],
-  "profiles": [
-    { "name": "corp", "hostname": "corp-proxy" },
-    { "name": "prod", "hostname": "prod-proxy", "domains": [".amazonaws.com"] }
-  ]
-}
-```
+| Where | What |
+| ----- | ---- |
+| node port 80 | HTTP proxy: the profile's domains (`.x` = every subdomain of x) go through its tunnel, everything else direct |
+| node port 8080, `http://localhost:35001` | dashboard (plain HTTP; the tailnet encrypts it) |
 
-| Node port | What |
-| --------- | ---- |
-| 80        | HTTP proxy: the profile's `domains` (default: the top-level list; `.x` = every subdomain of x) go through its tunnel, everything else direct |
-| 8080      | the profile's web UI (plain HTTP; the tailnet encrypts it) |
+The dashboard lists every profile with its status, and can connect (upload a
+`.ovpn`, or reconnect with the saved one), disconnect, add a profile (name, tailnet
+hostname, domains), edit those, and delete a profile. A new node shows its Tailscale
+login link in the dashboard. Changing a hostname or domains, or adding or deleting a
+profile, restarts sing-box: proxy connections and tailnet nodes of all profiles drop
+for a few seconds; VPN sessions stay up.
 
+- The profiles live in `/data/profiles.json`. On first start `AWSVPN_CONFIG` (optional)
+  seeds it:
+
+  ```json
+  {
+    "tailnet": "example.ts.net",
+    "domains": [".amazonaws.com", ".aws"],
+    "profiles": [
+      { "name": "corp", "hostname": "corp-proxy" },
+      { "name": "prod", "hostname": "prod-proxy", "domains": [".amazonaws.com"] }
+    ]
+  }
+  ```
+
+  The top-level `domains` are the default for profiles without their own and for
+  profiles added later. After the first start the seed file is not read again.
+- Profile mode starts when `AWSVPN_CONFIG` is set or `/data/profiles.json` exists.
+- Each profile's data is in `/data/<id>/`: `profile.ovpn` (with `SAVE_PROFILE=true`)
+  and `tailscale/` (the node key). Delete moves it to `/data/.trash/`. A deleted
+  profile's node stays in the Tailscale admin console (offline) until you remove it.
 - The tunnels never take the default route: profile *n* uses device `tun<n>`, and only
   its proxy's VPN traffic (firewall mark and routing table 100+*n*) enters it. While a
   tunnel is down, its VPN domains fail instead of going direct.
 - VPN domains resolve through the DNS server the VPN pushed; everything else through
   the container's resolver.
 - The proxy never reaches the container's loopback or link-local addresses, and its
-  direct path never reaches private networks.
+  direct path never reaches private networks. The dashboard refuses cross-site POSTs.
 - Port 35001 takes the SAML callback for whichever profile began auth last: log in one
   profile at a time.
-- State lives in `/data/<name>/`: `profile.ovpn` (with `SAVE_PROFILE=true`) and
-  `tailscale/` (the node key). On first start each node logs a Tailscale login URL.
 
 ```sh
 docker run -d --name awsvpn --init --restart unless-stopped \

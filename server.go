@@ -57,6 +57,7 @@ var (
 // profile is one VPN connection with its own web UI. The single-profile modes run
 // one; profile mode (AWSVPN_CONFIG, see profiles.go) runs one per configured profile.
 type profile struct {
+	id          string // profile mode: stable id (data and run folders); "" otherwise
 	name        string
 	profilePath string   // saved profile (savedProfilePath in single-profile mode)
 	eventFifo   string   // the openvpn hooks write connected/disconnected here
@@ -72,7 +73,11 @@ type profile struct {
 	// Defaults to "/".
 	publicURL string
 
-	// mutable VPN session state — all mutations happen on the HTTP server goroutine
+	fifo *os.File // event fifo, open while the profile runs
+	dns  io.Closer
+
+	// mutable VPN session state, guarded by mu
+	mu             sync.Mutex
 	vpnSID         string
 	vpn            *vpnState
 	activeCmd      *exec.Cmd
@@ -119,8 +124,8 @@ func newProfile(name, profilePath, fifo, publicURL string, hookArgs []string, on
 }
 
 func (p *profile) logf(format string, args ...any) {
-	if p.name != "" {
-		format = "[" + p.name + "] " + format
+	if p.id != "" {
+		format = "[" + p.id + "] " + format
 	}
 	log.Printf(format, args...)
 }
@@ -221,6 +226,12 @@ func (p *profile) setConnStatus(s string) {
 }
 
 func (p *profile) broadcast(s string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.broadcastLocked(s)
+}
+
+func (p *profile) broadcastLocked(s string) {
 	p.setConnStatus(s)
 	p.fanOut(ssePayload(s, statusMessages[s]))
 }
@@ -265,17 +276,24 @@ func (p *profile) beginReconnect() (string, error) {
 	return p.beginAuth(data)
 }
 
-func (p *profile) listenEvents() {
+// openEvents creates the fifo the openvpn hooks report to; readEvents then reads it
+// until close.
+func (p *profile) openEvents() error {
 	os.Remove(p.eventFifo)
 	if err := syscall.Mkfifo(p.eventFifo, 0600); err != nil {
-		log.Fatalf("mkfifo: %v", err)
+		return fmt.Errorf("mkfifo: %v", err)
 	}
 	// O_RDWR keeps the read end open so reads don't return EOF when no writer is connected
 	f, err := os.OpenFile(p.eventFifo, os.O_RDWR, os.ModeNamedPipe)
 	if err != nil {
-		log.Fatalf("open fifo: %v", err)
+		return fmt.Errorf("open fifo: %v", err)
 	}
-	scanner := bufio.NewScanner(f)
+	p.fifo = f
+	return nil
+}
+
+func (p *profile) readEvents() {
+	scanner := bufio.NewScanner(p.fifo)
 	for scanner.Scan() {
 		s := strings.TrimSpace(scanner.Text())
 		if s == "connected" || s == "disconnected" {
@@ -398,14 +416,52 @@ func (p *profile) connectVPN(v *vpnState, sid, encodedSAML string) {
 	cmd.Stdin = strings.NewReader(fmt.Sprintf("N/A\nCRV1::%s::%s\n", sid, encodedSAML))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	p.activeCmd = cmd
-	if err := cmd.Run(); err != nil {
+	p.mu.Lock()
+	err := cmd.Start()
+	if err == nil {
+		p.activeCmd = cmd
+	}
+	p.mu.Unlock()
+	if err == nil {
+		err = cmd.Wait()
+	}
+	if err != nil {
 		p.logf("openvpn exited: %v", err)
 	}
-	p.activeCmd = nil
+	p.mu.Lock()
+	if p.activeCmd == cmd {
+		p.activeCmd = nil
+	}
+	p.mu.Unlock()
 	p.broadcast("disconnected") // fallback if route-pre-down.sh didn't fire
 }
 
+// disconnect stops the VPN session; no auto-reconnect follows.
+func (p *profile) disconnect() {
+	p.mu.Lock()
+	cmd := p.activeCmd
+	p.wasConnected = false
+	p.pendingAuthURL = ""
+	p.mu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		p.logf("disconnecting")
+		cmd.Process.Kill()
+	}
+}
+
+// close disconnects and stops the profile's listeners (profile deleted).
+func (p *profile) close() {
+	p.disconnect()
+	if p.fifo != nil {
+		p.fifo.Close()
+		os.Remove(p.eventFifo)
+	}
+	if p.dns != nil {
+		p.dns.Close()
+	}
+}
+
+// beginAuth runs with p.mu held.
 func (p *profile) beginAuth(data []byte) (string, error) {
 	state, err := processOVPN(data)
 	if err != nil {
@@ -465,10 +521,17 @@ func (p *profile) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	ch := make(chan string, 1)
+	p.mu.Lock()
 	p.sseClients[ch] = struct{}{}
-	defer delete(p.sseClients, ch)
+	status := p.connStatus
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.sseClients, ch)
+		p.mu.Unlock()
+	}()
 
-	fmt.Fprintf(w, "%s\n\n", ssePayload(p.connStatus, statusMessages[p.connStatus]))
+	fmt.Fprintf(w, "%s\n\n", ssePayload(status, statusMessages[status]))
 	flusher.Flush()
 
 	for {
@@ -504,6 +567,8 @@ func (p *profile) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	// A new upload supersedes any previously saved profile: drop the old file now,
 	// regardless of outcome. The new one is only persisted once it connects.
 	p.clearSavedProfile()
@@ -520,6 +585,12 @@ func (p *profile) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *profile) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		p.handleSAML(w, r)
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if r.Method == http.MethodGet {
 		// Auto-reconnect: only after a session that was connected and then dropped
 		// this run. wasConnected stays false on a fresh start or an invalid profile,
@@ -543,28 +614,6 @@ func (p *profile) handleRoot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.Method == http.MethodPost {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "parse error: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		samlResponse := r.FormValue("SAMLResponse")
-		if samlResponse == "" {
-			http.Error(w, "missing SAMLResponse", http.StatusBadRequest)
-			return
-		}
-		encoded := url.QueryEscape(samlResponse)
-		p.logf("Received SAML response, launching VPN connection.")
-		// The auth URL is consumed — clear it so GET / doesn't bounce back to SAML
-		// (which would auto-POST again via an active IdP session and reload-loop).
-		p.pendingAuthURL = ""
-		if p.vpn != nil {
-			p.broadcast("connecting")
-			go p.connectVPN(p.vpn, p.vpnSID, encoded)
-		}
-		http.Redirect(w, r, p.publicURL, http.StatusFound)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html")
 	reconnectHTML := ""
 	if p.hasProfile() {
@@ -577,12 +626,39 @@ func (p *profile) handleRoot(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, indexHTML, title, statusEmojis[p.connStatus], title, p.connStatus, statusMessages[p.connStatus], reconnectHTML)
 }
 
+// handleSAML takes the SAML result AWS posts to the callback port and connects.
+func (p *profile) handleSAML(w http.ResponseWriter, r *http.Request) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse error: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	samlResponse := r.FormValue("SAMLResponse")
+	if samlResponse == "" {
+		http.Error(w, "missing SAMLResponse", http.StatusBadRequest)
+		return
+	}
+	encoded := url.QueryEscape(samlResponse)
+	p.logf("Received SAML response, launching VPN connection.")
+	// The auth URL is consumed — clear it so GET / doesn't bounce back to SAML
+	// (which would auto-POST again via an active IdP session and reload-loop).
+	p.pendingAuthURL = ""
+	if p.vpn != nil {
+		p.broadcastLocked("connecting")
+		go p.connectVPN(p.vpn, p.vpnSID, encoded)
+	}
+	http.Redirect(w, r, p.publicURL, http.StatusFound)
+}
+
 func (p *profile) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
 	}
+	p.mu.Lock()
 	authURL, err := p.beginReconnect()
+	p.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -672,8 +748,8 @@ func main() {
 		log.Printf("AUTO_RECONNECT enabled: re-authenticate on visit after a dropped session")
 	}
 
-	if cfg := os.Getenv("AWSVPN_CONFIG"); cfg != "" {
-		runProfiles(cfg)
+	if _, err := os.Stat(statePath); err == nil || os.Getenv("AWSVPN_CONFIG") != "" {
+		runProfiles(os.Getenv("AWSVPN_CONFIG"))
 		return
 	}
 
@@ -687,7 +763,10 @@ func main() {
 	}
 
 	p := newProfile("", savedProfilePath, eventFifo, publicURL, legacyHookArgs, registerACS)
-	go p.listenEvents()
+	if err := p.openEvents(); err != nil {
+		log.Fatal(err)
+	}
+	go p.readEvents()
 
 	log.Printf("Listening at http://localhost:%s", port)
 	if err := http.ListenAndServe(":"+port, p.mux); err != nil {
