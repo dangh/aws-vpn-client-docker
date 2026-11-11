@@ -72,6 +72,7 @@ for a few seconds; VPN sessions stay up.
   ```json
   {
     "tailnet": "example.ts.net",
+    "ssh": "root@vpn-host",
     "domains": [".amazonaws.com", ".aws"],
     "profiles": [
       { "name": "corp", "hostname": "corp-proxy" },
@@ -81,7 +82,8 @@ for a few seconds; VPN sessions stay up.
   ```
 
   The top-level `domains` are the default for profiles without their own and for
-  profiles added later. After the first start the seed file is not read again.
+  profiles added later. `ssh` (optional) is the VPN host as you reach it with `ssh`:
+  the dashboard shows the full tunnel command with it. After the first start the seed file is not read again.
 - Profile mode starts when `AWSVPN_CONFIG` is set or `/data/profiles.json` exists.
 - Each profile's data is in `/data/<id>/`: `profile.ovpn` (with `SAVE_PROFILE=true`)
   and `tailscale/` (the node key). Delete moves it to `/data/.trash/`. A deleted
@@ -93,8 +95,10 @@ for a few seconds; VPN sessions stay up.
   the container's resolver.
 - The proxy never reaches the container's loopback or link-local addresses, and its
   direct path never reaches private networks. The dashboard answers only its own host names (localhost, 127.0.0.1, the nodes) and refuses POSTs without its own Origin.
-- Port 35001 takes the SAML callback for whichever profile began auth last: log in one
-  profile at a time.
+- Port 35001 takes the SAML callback of every profile, so the dashboard runs one AWS
+  sign-in at a time: a second one is refused until the first ends (its result, Cancel
+  sign-in on its card, or 5 minutes). A callback is taken only when its SAML Response
+  answers the open sign-in's AuthnRequest (`InResponseTo`); any other is refused.
 
 ```sh
 docker run -d --name awsvpn --init --restart unless-stopped \

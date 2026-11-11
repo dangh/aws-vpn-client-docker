@@ -1,0 +1,164 @@
+{{define "style"}}<style>
+  /* shadcn/ui look (neutral theme, new-york-v4 tokens) in plain CSS: no build step. */
+  :root {
+    color-scheme: light;
+    --radius: 0.625rem;
+    --background: oklch(1 0 0); --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0); --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0); --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0); --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0); --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0); --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0); --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0); --input: oklch(0.922 0 0); --ring: oklch(0.708 0 0);
+    --success: oklch(0.627 0.194 149.214); --pending: oklch(0.769 0.188 70.08);
+    --warning-bg: oklch(0.987 0.022 95.277); --warning-border: oklch(0.924 0.12 95.746);
+    --warning-fg: oklch(0.414 0.112 45.904);
+    --page: oklch(0.985 0 0);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --background: oklch(0.145 0 0); --foreground: oklch(0.985 0 0);
+      --card: oklch(0.205 0 0); --card-foreground: oklch(0.985 0 0);
+      --popover: oklch(0.205 0 0); --popover-foreground: oklch(0.985 0 0);
+      --primary: oklch(0.922 0 0); --primary-foreground: oklch(0.205 0 0);
+      --secondary: oklch(0.269 0 0); --secondary-foreground: oklch(0.985 0 0);
+      --muted: oklch(0.269 0 0); --muted-foreground: oklch(0.708 0 0);
+      --accent: oklch(0.269 0 0); --accent-foreground: oklch(0.985 0 0);
+      --destructive: oklch(0.704 0.191 22.216);
+      --border: oklch(1 0 0 / 10%); --input: oklch(1 0 0 / 15%); --ring: oklch(0.556 0 0);
+      --success: oklch(0.723 0.219 149.579); --pending: oklch(0.828 0.189 84.429);
+      --warning-bg: oklch(0.279 0.077 45.635 / 45%); --warning-border: oklch(0.476 0.114 61.907 / 60%);
+      --warning-fg: oklch(0.905 0.182 98.111);
+      --page: oklch(0.145 0 0);
+    }
+  }
+
+  *, ::before, ::after { box-sizing: border-box; border: 0 solid var(--border); }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; min-height: 100vh; background: var(--page); color: var(--foreground);
+    font: 14px/1.5 "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, p { margin: 0; }
+  button, input, textarea { font: inherit; color: inherit; }
+  a { color: inherit; }
+  code, .mono { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { font-size: 0.85em; background: var(--muted); border-radius: 4px; padding: 0.1em 0.35em; }
+  svg { flex-shrink: 0; }
+  /* Every focusable thing shows focus; controls with their own ring (below) replace it. */
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+  .btn:focus-visible, .input:focus-visible, .textarea:focus-visible, .input-group input:focus-visible, .menu-item:focus-visible { outline: none; }
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after, ::backdrop { animation: none !important; transition: none !important; }
+  }
+  .muted { color: var(--muted-foreground); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* Button */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap;
+    height: 36px; padding: 0 16px; border-radius: calc(var(--radius) - 2px); border: 1px solid transparent;
+    font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; background: transparent;
+    transition: background-color .15s, color .15s, box-shadow .15s, border-color .15s; }
+  .btn svg { width: 16px; height: 16px; }
+  .btn:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+  .btn:disabled, .btn[aria-disabled=true] { opacity: .5; pointer-events: none; }
+  .btn-default { background: var(--primary); color: var(--primary-foreground); box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+  .btn-default:hover { background: color-mix(in oklab, var(--primary) 90%, transparent); }
+  .btn-outline { background: var(--background); border-color: var(--border); box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+  .btn-outline:hover { background: var(--accent); color: var(--accent-foreground); }
+  .btn-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+  .btn-destructive { background: var(--destructive); color: #fff; box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+  .btn-destructive:hover { background: color-mix(in oklab, var(--destructive) 90%, transparent); }
+  .btn-destructive:focus-visible { box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 25%, transparent); }
+  .btn-sm { height: 32px; padding: 0 12px; gap: 6px; }
+  .btn-icon { width: 36px; padding: 0; }
+  .btn-icon.btn-sm { width: 32px; }
+  .btn-xs { height: 24px; width: 24px; padding: 0; border-radius: calc(var(--radius) - 4px); }
+  .btn-xs svg { width: 14px; height: 14px; }
+  @media (prefers-color-scheme: dark) {
+    .btn-outline { background: color-mix(in oklab, var(--input) 30%, transparent); border-color: var(--input); }
+    .btn-outline:hover { background: color-mix(in oklab, var(--input) 50%, transparent); }
+    .btn-ghost:hover { background: color-mix(in oklab, var(--accent) 50%, transparent); }
+    .btn-destructive { background: color-mix(in oklab, var(--destructive) 60%, transparent); }
+  }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Card */
+  .card { display: flex; flex-direction: column; gap: 20px; padding: 24px 0; background: var(--card);
+    color: var(--card-foreground); border: 1px solid var(--border); border-radius: calc(var(--radius) + 4px);
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / .06), 0 1px 2px -1px rgb(0 0 0 / .06); }
+  .card-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 0 24px; }
+  .card-title { font-size: 16px; font-weight: 600; line-height: 1.25; display: flex; align-items: center; gap: 8px;
+    flex-wrap: wrap; overflow-wrap: anywhere; }
+  .card-description { grid-column: 1; color: var(--muted-foreground); font-size: 14px; }
+  .card-action { grid-column: 2; grid-row: 1 / span 2; align-self: start; justify-self: end; margin: -6px -8px 0 0; }
+  .card-content { display: flex; flex-direction: column; gap: 16px; padding: 0 24px; }
+  .card-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 24px 24px 0;
+    border-top: 1px solid var(--border); }
+  .card-footer .grow { flex: 1; }
+
+  /* Badge */
+  .badge { display: inline-flex; align-items: center; gap: 6px; width: fit-content; white-space: nowrap;
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 2px 8px;
+    font-size: 12px; font-weight: 500; line-height: 16px; }
+  .badge-secondary { background: var(--secondary); color: var(--secondary-foreground); border-color: transparent; }
+  .badge-mono { max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 400; }
+  .dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--muted-foreground); }
+  [data-state=connected] .dot { background: var(--success); }
+  [data-state=connecting] .dot, [data-state=signing-in] .dot { background: var(--pending); }
+  [data-state=connecting] .dot::after, [data-state=signing-in] .dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%;
+    background: inherit; animation: ping 1.2s cubic-bezier(0, 0, .2, 1) infinite; }
+  [data-state=error] .dot { background: var(--destructive); }
+  @keyframes ping { 75%, 100% { transform: scale(2.2); opacity: 0; } }
+
+  /* Alert */
+  .alert { display: grid; grid-template-columns: 16px 1fr; gap: 2px 12px; align-items: start; padding: 12px 16px;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); font-size: 14px; }
+  .alert > svg { width: 16px; height: 16px; margin-top: 2px; }
+  .alert-title { font-size: 14px; font-weight: 500; line-height: 20px; }
+  .alert-description { grid-column: 2; color: var(--muted-foreground); }
+  .alert-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .alert-warning { background: var(--warning-bg); border-color: var(--warning-border); color: var(--warning-fg); }
+  .alert-warning .alert-description { color: inherit; opacity: .85; }
+  .alert-destructive { color: var(--destructive); }
+  .alert-destructive .alert-description { color: color-mix(in oklab, var(--destructive) 90%, transparent); }
+
+  /* Field, Input, Textarea, InputGroup */
+  .field-group { display: flex; flex-direction: column; gap: 20px; }
+  .field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .label { font-size: 14px; font-weight: 500; line-height: 1; display: flex; align-items: center; gap: 8px; }
+  .field-description { color: var(--muted-foreground); font-size: 13px; line-height: 1.45; }
+  .input, .textarea, .input-group { width: 100%; border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px);
+    background: transparent; box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); transition: border-color .15s, box-shadow .15s; }
+  .input, .textarea { padding: 4px 12px; font-size: 14px; }
+  .input { height: 36px; }
+  .textarea { min-height: 64px; padding: 8px 12px; resize: vertical; line-height: 1.6; }
+  .input::placeholder, .textarea::placeholder { color: var(--muted-foreground); }
+  .input:focus-visible, .textarea:focus-visible, .input-group:focus-within {
+    border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+  .input:user-invalid, .textarea:user-invalid, .input-group:has(:user-invalid) {
+    border-color: var(--destructive); box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 20%, transparent); }
+  .input-group { display: flex; align-items: center; height: 36px; min-width: 0; }
+  .input-group input { flex: 1; min-width: 0; height: 100%; border: 0; background: transparent; padding: 0 12px; font-size: 14px; outline: none; }
+  .input-group input[readonly] { cursor: text; }
+  .input-group-addon { display: flex; align-items: center; gap: 4px; padding: 0 8px 0 0; color: var(--muted-foreground);
+    font-size: 13px; white-space: nowrap; }
+  .input-group-addon.text { padding: 0 12px 0 0; }
+  @media (prefers-color-scheme: dark) {
+    .input, .textarea, .input-group { background: color-mix(in oklab, var(--input) 30%, transparent); }
+  }
+  @media (max-width: 640px) { .input, .textarea, .input-group input { font-size: 16px !important; } }
+  @media (max-width: 560px) {
+    .card { padding: 20px 0; }
+    .card-header, .card-content { padding: 0 20px; }
+  }
+
+  /* Layout */
+  main { max-width: 720px; margin: 0 auto; padding: 40px 16px 56px; display: flex; flex-direction: column; gap: 24px; }
+  .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .page-head h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.2; }
+  .page-head p { color: var(--muted-foreground); margin-top: 4px; }
+</style>{{end}}

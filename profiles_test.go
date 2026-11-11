@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +96,23 @@ func TestGuard(t *testing.T) {
 		if w.Code != c.want {
 			t.Errorf("%s %s%s origin %q: %d, want %d", c.method, c.host, c.path, c.origin, w.Code, c.want)
 		}
+	}
+}
+
+func TestDashboardKeepsUnsavedForm(t *testing.T) {
+	dir := t.TempDir()
+	m := &manager{st: state{Tailnet: "example.ts.net", SSH: "root@nas", Domains: []string{".aws"},
+		Profiles: []profileState{{ID: "corp", N: 1, Name: "corp", Hostname: "corp-proxy", Domains: []string{".a", ".b", ".c", ".d", ".e"}}}},
+		profiles: map[string]*profile{"corp": {name: "corp", profilePath: filepath.Join(dir, "none")}}, loginURLs: map[string]string{}}
+	w := httptest.NewRecorder()
+	m.handleDashboard(w, &formView{Dialog: "edit-corp", Name: "corp", Hostname: "Bad Host", Domains: ".x", Error: "bad hostname"})
+	body := w.Body.String()
+	for _, want := range []string{`data-open="edit-corp"`, `value="Bad Host"`, "bad hostname", "root@nas", "Show all 5"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard lacks %q", want)
+		}
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("code %d, want 400", w.Code)
 	}
 }

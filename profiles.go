@@ -41,7 +41,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -64,6 +63,7 @@ func vpnMark(n int) int   { return 100 + n } // also the routing table id
 // config is the seed file (AWSVPN_CONFIG).
 type config struct {
 	Tailnet  string          `json:"tailnet"`
+	SSH      string          `json:"ssh"` // the VPN host as `ssh` takes it, for the tunnel hint
 	Domains  []string        `json:"domains"`
 	Profiles []profileConfig `json:"profiles"`
 }
@@ -77,6 +77,7 @@ type profileConfig struct {
 // state is /data/profiles.json.
 type state struct {
 	Tailnet  string         `json:"tailnet,omitempty"`
+	SSH      string         `json:"ssh,omitempty"`
 	Domains  []string       `json:"domains,omitempty"` // default for new profiles
 	Profiles []profileState `json:"profiles"`
 }
@@ -92,6 +93,7 @@ type profileState struct {
 var (
 	// DNS-label shaped: ids and host names become paths, tags and tailnet names.
 	labelRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
+	sshRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
 	domainRe = regexp.MustCompile(`^\.?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 )
 
@@ -119,7 +121,7 @@ func loadConfig(path string) (*config, error) {
 }
 
 func seedState(cfg *config) *state {
-	st := &state{Tailnet: cfg.Tailnet, Domains: cfg.Domains}
+	st := &state{Tailnet: cfg.Tailnet, SSH: cfg.SSH, Domains: cfg.Domains}
 	for i, pc := range cfg.Profiles {
 		st.Profiles = append(st.Profiles, profileState{ID: pc.Name, N: i + 1, Name: pc.Name, Hostname: pc.Hostname, Domains: pc.Domains})
 	}
@@ -130,6 +132,9 @@ func seedState(cfg *config) *state {
 func validate(st *state) error {
 	if len(st.Profiles) > maxProfiles {
 		return fmt.Errorf("at most %d profiles", maxProfiles)
+	}
+	if st.SSH != "" && !sshRe.MatchString(st.SSH) {
+		return fmt.Errorf("ssh %q: use a host name, optionally user@host", st.SSH)
 	}
 	seen := map[string]bool{}
 	for _, ps := range st.Profiles {
@@ -163,11 +168,15 @@ type manager struct {
 	mu       sync.Mutex
 	st       state
 	profiles map[string]*profile // by id
-	active   atomic.Pointer[profile]
 	singBox  *exec.Cmd
 
 	loginMu   sync.Mutex
 	loginURLs map[string]string // tailnet login URL sing-box logged, by id
+
+	signIn  *signIn // the AWS sign-in under way, see signin.go (m.mu)
+	seq     int     // last sign-in attempt number (m.mu)
+	version int     // changes when an open dashboard must refresh (m.mu)
+	subs    map[chan struct{}]struct{}
 }
 
 func runProfiles(seed string) {
@@ -241,10 +250,6 @@ func (m *manager) startProfile(ps profileState) error {
 	// After the SAML login the browser is on the callback port, which serves the dashboard.
 	p := newProfile(ps.Name, filepath.Join(dataDir, ps.ID, "profile.ovpn"), filepath.Join(run, "events"), "/", hookArgs, nil)
 	p.id = ps.ID
-	p.onAuth = func() {
-		m.active.Store(p)
-		p.logf("SAML callback on :%s now goes to this profile", port)
-	}
 	if err := p.openEvents(); err != nil {
 		return err
 	}
@@ -263,7 +268,10 @@ func (m *manager) startProfile(ps profileState) error {
 func (m *manager) stopProfile(ps profileState) {
 	if p := m.profiles[ps.ID]; p != nil {
 		p.close()
-		m.active.CompareAndSwap(p, nil)
+		if m.signIn != nil && m.signIn.p == p {
+			m.signIn = nil
+			m.changed()
+		}
 		delete(m.profiles, ps.ID)
 	}
 	removeRouting(vpnMark(ps.N))
@@ -284,6 +292,7 @@ func (m *manager) apply(st *state) error {
 		return err
 	}
 	m.st = *st
+	m.changed()
 	log.Printf("profiles changed: reloading sing-box")
 	return m.singBox.Process.Signal(syscall.SIGHUP)
 }

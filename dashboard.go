@@ -1,10 +1,12 @@
 package main
 
 import (
+	"embed"
 	"html/template"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -14,39 +16,49 @@ import (
 // result, for the profile that began auth last.
 func (m *manager) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", m.handleDashboard)
-	mux.HandleFunc("POST /{$}", func(w http.ResponseWriter, r *http.Request) {
-		p := m.active.Load()
-		if p == nil {
-			http.Error(w, "no active auth target; start a connection from the dashboard first", http.StatusServiceUnavailable)
-			return
-		}
-		p.handleSAML(w, r)
-	})
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { m.handleDashboard(w, nil) })
+	mux.HandleFunc("POST /{$}", m.handleCallback)
+	mux.HandleFunc("GET /events", m.handleVersion)
 	mux.HandleFunc("POST /add", func(w http.ResponseWriter, r *http.Request) {
-		m.done(w, r, m.addProfile(r.FormValue("name"), r.FormValue("hostname"), splitDomains(r.FormValue("domains"))))
+		f := postedForm(r, "add")
+		m.saved(w, r, f, m.addProfile(f.Name, f.Hostname, splitDomains(f.Domains)))
 	})
 	mux.HandleFunc("GET /p/{id}/events", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) { p.handleEvents(w, r) }))
 	mux.HandleFunc("GET /p/{id}/login", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		u := p.pendingAuthURL
-		p.mu.Unlock()
+		m.mu.Lock()
+		u := ""
+		if a := m.signingIn(); a != nil && a.p == p {
+			u = a.url // empty while the attempt is still starting
+		}
+		m.mu.Unlock()
+		if u == "" {
+			p.mu.Lock()
+			u = p.pendingAuthURL // an auto-reconnect
+			p.mu.Unlock()
+		}
 		if u == "" {
 			u = "/"
 		}
 		http.Redirect(w, r, u, http.StatusFound)
 	}))
-	mux.HandleFunc("POST /p/{id}/upload", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) { p.handleUpload(w, r) }))
-	mux.HandleFunc("POST /p/{id}/reconnect", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) { p.handleReconnect(w, r) }))
+	mux.HandleFunc("POST /p/{id}/upload", m.withProfile(m.connect((*profile).handleUpload)))
+	mux.HandleFunc("POST /p/{id}/reconnect", m.withProfile(m.connect((*profile).handleReconnect)))
 	mux.HandleFunc("POST /p/{id}/disconnect", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) {
 		p.disconnect()
-		m.done(w, r, nil)
+		m.endSignIn(p)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}))
 	mux.HandleFunc("POST /p/{id}/edit", func(w http.ResponseWriter, r *http.Request) {
-		m.done(w, r, m.updateProfile(r.PathValue("id"), r.FormValue("name"), r.FormValue("hostname"), splitDomains(r.FormValue("domains"))))
+		id := r.PathValue("id")
+		f := postedForm(r, "edit-"+id)
+		m.saved(w, r, f, m.updateProfile(id, f.Name, f.Hostname, splitDomains(f.Domains)))
 	})
 	mux.HandleFunc("POST /p/{id}/delete", func(w http.ResponseWriter, r *http.Request) {
-		m.done(w, r, m.deleteProfile(r.PathValue("id")))
+		if err := m.deleteProfile(r.PathValue("id")); err != nil {
+			m.fail(w, "Could not delete the profile", err.Error(), "")
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 	return m.guard(mux)
 }
@@ -100,13 +112,36 @@ func (m *manager) withProfile(h func(*profile, http.ResponseWriter, *http.Reques
 	}
 }
 
-func (m *manager) done(w http.ResponseWriter, r *http.Request, err error) {
+// formView is what a profile form shows: the profile, or what was posted when it was
+// not saved.
+type formView struct {
+	Dialog, Name, Hostname, Domains, Error string
+}
+
+func postedForm(r *http.Request, dialog string) formView {
+	return formView{Dialog: dialog, Name: r.FormValue("name"), Hostname: strings.TrimSpace(r.FormValue("hostname")), Domains: r.FormValue("domains")}
+}
+
+// saved answers a profile form: back to the dashboard, or, when it was not saved, the
+// dashboard with that form open again, its input kept and the reason shown.
+func (m *manager) saved(w http.ResponseWriter, r *http.Request, f formView, err error) {
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		errorTmpl.Execute(w, err.Error())
+		// The form names the profile already: drop validate's `profile "x": ` prefix.
+		msg := profilePrefix.ReplaceAllString(err.Error(), "")
+		f.Error = strings.ToUpper(msg[:1]) + msg[1:] + "."
+		m.handleDashboard(w, &f)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+var profilePrefix = regexp.MustCompile(`^profile "[^"]*": `)
+
+func (m *manager) fail(w http.ResponseWriter, title, msg, detail string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Del("X-Content-Type-Options")
+	w.WriteHeader(http.StatusBadRequest)
+	pages.ExecuteTemplate(w, "error.html", map[string]string{"Title": title, "Message": msg, "Detail": detail})
 }
 
 // splitDomains reads a domain list typed one per line, or separated by commas or spaces.
@@ -117,14 +152,18 @@ func splitDomains(s string) []string {
 }
 
 type profileView struct {
-	ID, Name, Hostname, Host, Domains   string
-	Status, StatusText, Emoji, LoginURL string
-	PendingAuth, HasProfile, Running    bool
+	ID, Name, Hostname, Host, Status, StatusText, LoginURL string
+	Domains                                                []string
+	HasProfile, Running, SigningIn                         bool
+	BlockedBy                                              string // another profile's sign-in is under way
+	Form                                                   formView
 }
 
-func (m *manager) handleDashboard(w http.ResponseWriter, r *http.Request) {
+func (m *manager) handleDashboard(w http.ResponseWriter, posted *formView) {
 	m.mu.Lock()
+	a := m.signingIn()
 	var views []profileView
+	connected := 0
 	for _, ps := range m.st.Profiles {
 		p := m.profiles[ps.ID]
 		host := ps.Hostname
@@ -132,116 +171,82 @@ func (m *manager) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			host += "." + m.st.Tailnet
 		}
 		v := profileView{ID: ps.ID, Name: ps.Name, Hostname: ps.Hostname, Host: host,
-			Domains: strings.Join(ps.Domains, "\n"), LoginURL: m.loginURL(ps.ID), HasProfile: p.hasProfile()}
+			Domains: ps.Domains, LoginURL: m.loginURL(ps.ID), HasProfile: p.hasProfile(),
+			Form: formView{Dialog: "edit-" + ps.ID, Name: ps.Name, Hostname: ps.Hostname, Domains: strings.Join(ps.Domains, "\n")}}
 		p.mu.Lock()
-		v.Status, v.PendingAuth, v.Running = p.connStatus, p.pendingAuthURL != "", p.activeCmd != nil
+		v.Status = p.connStatus
+		v.SigningIn = p.pendingAuthURL != "" || (a != nil && a.p == p)
+		v.Running = p.activeCmd != nil || v.Status == "connected" || v.Status == "connecting"
 		p.mu.Unlock()
-		v.StatusText, v.Emoji = statusMessages[v.Status], statusEmojis[v.Status]
+		if a != nil && a.p != p {
+			v.BlockedBy = a.p.name
+		}
+		if posted != nil && posted.Dialog == v.Form.Dialog {
+			v.Form = *posted
+		}
+		v.StatusText = statusMessages[v.Status]
+		if v.Status == "connected" {
+			connected++
+		}
 		views = append(views, v)
 	}
-	defaults := strings.Join(m.st.Domains, "\n")
+	add := formView{Dialog: "add", Domains: strings.Join(m.st.Domains, "\n")}
+	if posted != nil && posted.Dialog == "add" {
+		add = *posted
+	}
+	open := ""
+	if posted != nil {
+		open = posted.Dialog
+	}
+	data := struct {
+		Profiles           []profileView
+		Connected, Version int
+		Tailnet, SSH, Open string
+		Add                formView
+	}{views, connected, m.version, m.st.Tailnet, m.st.SSH, open, add}
 	m.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	dashboardTmpl.Execute(w, struct {
-		Profiles []profileView
-		Domains  string
-	}{views, defaults})
+	if posted != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	pages.ExecuteTemplate(w, "dashboard.html", data)
 }
 
-var errorTmpl = template.Must(template.New("error").Parse(`<!DOCTYPE html>
-<meta charset="utf-8"><title>AWS VPN</title>
-<body style="font-family: sans-serif; margin: 60px auto; padding: 0 16px; max-width: 640px">
-<p style="color: #c5221f"><b>Not changed:</b> {{.}}</p><p><a href="/">Back to the dashboard</a></p>`))
+//go:embed ui/*.html
+var uiFiles embed.FS
 
-var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AWS VPN</title>
-  <style>
-    body { font-family: sans-serif; margin: 40px auto; padding: 0 16px; max-width: 720px; color: #222; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
-    .head { display: flex; align-items: center; gap: 12px; }
-    .head h2 { margin: 0; flex: 1; font-size: 1.3em; }
-    .emoji { font-size: 2em; }
-    .status { padding: 4px 12px; border-radius: 4px; font-weight: bold; }
-    .idle, .disconnected { background: #f1f3f4; color: #666; }
-    .connecting { background: #fef9e7; color: #b45309; }
-    .connected  { background: #e6f4ea; color: #2d6a2d; }
-    .error      { background: #f3e8ff; color: #6b21a8; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
-    .actions form { margin: 0; }
-    button, .button { padding: 6px 14px; font-size: 0.95em; cursor: pointer; }
-    .danger { color: #c5221f; }
-    .warn { background: #fef9e7; padding: 8px 12px; border-radius: 4px; }
-    label { display: block; margin: 8px 0 4px; font-weight: bold; }
-    input[type=text], textarea { width: 100%; box-sizing: border-box; padding: 6px; font: inherit; }
-    textarea { font-family: monospace; }
-    code { background: #f1f3f4; padding: 1px 4px; border-radius: 3px; }
-    .note { color: #666; font-size: 0.9em; }
-    summary { cursor: pointer; margin-top: 8px; }
-  </style>
-</head>
-<body>
-  <h1>AWS VPN</h1>
-  {{range .Profiles}}
-  <section class="card">
-    <div class="head">
-      <span class="emoji" data-emoji="{{.ID}}">{{.Emoji}}</span>
-      <h2>{{.Name}}</h2>
-      <span class="status {{.Status}}" data-status="{{.ID}}">{{.StatusText}}</span>
-    </div>
-    <p>Proxy <code>http://{{.Host}}</code> · dashboard <a href="http://{{.Host}}:8080/">{{.Host}}:8080</a></p>
-    {{if .LoginURL}}<p class="warn">The tailnet node <b>{{.Hostname}}</b> is not logged in yet: <a href="{{.LoginURL}}" target="_blank" rel="noopener">log it in to Tailscale</a>, then reload this page.</p>{{end}}
-    {{if .PendingAuth}}<p class="warn">SAML login started: <a href="/p/{{.ID}}/login">continue it</a>.</p>{{end}}
-    <div class="actions">
-      <form method="POST" action="/p/{{.ID}}/upload" enctype="multipart/form-data">
-        <label class="button" style="display: inline; font-weight: normal">Connect with a .ovpn file
-          <input type="file" name="ovpn" accept=".ovpn" onchange="this.form.submit()" hidden></label>
-      </form>
-      {{if .HasProfile}}<form method="POST" action="/p/{{.ID}}/reconnect"><button>Reconnect with saved profile</button></form>{{end}}
-      {{if .Running}}<form method="POST" action="/p/{{.ID}}/disconnect"><button>Disconnect</button></form>{{end}}
-    </div>
-    <details>
-      <summary>Edit</summary>
-      <form method="POST" action="/p/{{.ID}}/edit">
-        <label>Name</label><input type="text" name="name" value="{{.Name}}" maxlength="40" required>
-        <label>Tailnet hostname</label><input type="text" name="hostname" value="{{.Hostname}}" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?">
-        <label>Domains through this VPN (one per line; <code>.example.com</code> = every subdomain)</label>
-        <textarea name="domains" rows="6" required>{{.Domains}}</textarea>
-        <p class="note">Changing the hostname or domains restarts the proxies and tailnet nodes of all profiles for a few seconds; VPN sessions stay up.</p>
-        <button>Save</button>
-      </form>
-      <form method="POST" action="/p/{{.ID}}/delete" onsubmit="return confirm('Delete profile ' + {{.Name}} + '? Its VPN disconnects and its tailnet node goes offline (remove it in the Tailscale admin console). Its data moves to /data/.trash.')">
-        <p><button class="danger">Delete profile</button></p>
-      </form>
-    </details>
-  </section>
-  {{else}}
-  <p>No profiles yet.</p>
-  {{end}}
-  <details class="card"{{if not .Profiles}} open{{end}}>
-    <summary><b>Add a profile</b></summary>
-    <form method="POST" action="/add">
-      <label>Name</label><input type="text" name="name" maxlength="40" required>
-      <label>Tailnet hostname</label><input type="text" name="hostname" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?">
-      <label>Domains through this VPN (one per line; <code>.example.com</code> = every subdomain)</label>
-      <textarea name="domains" rows="6" required>{{.Domains}}</textarea>
-      <p class="note">The new tailnet node shows a Tailscale login link here after you add it.</p>
-      <button>Add</button>
-    </form>
-  </details>
-  <p class="note">Log in one profile at a time. AWS sends the SAML result to <code>http://127.0.0.1:35001</code>: keep <code>ssh -N -L 35001:localhost:35001</code> to the host open.</p>
-  <script>
-    const emojis = { idle: '🔓', connecting: '⏳', connected: '🔐', disconnected: '🔓', error: '⛓️‍💥' };
-    document.querySelectorAll('[data-status]').forEach(el => {
-      const id = el.dataset.status, emoji = document.querySelector('[data-emoji="' + id + '"]');
-      const set = (status, message) => { el.className = 'status ' + status; el.textContent = message; emoji.textContent = emojis[status] || ''; };
-      const es = new EventSource('/p/' + id + '/events');
-      es.onmessage = ({ data }) => { const { status, message } = JSON.parse(data); set(status, message); };
-      es.onerror = () => set('error', "Container's down");
-    });
-  </script>
-</body>
-</html>`))
+var pages = template.Must(template.New("").Funcs(template.FuncMap{
+	"icon": func(name string) template.HTML {
+		return template.HTML(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` + icons[name] + `</svg>`)
+	},
+	"dict": func(kv ...any) map[string]any {
+		m := map[string]any{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	},
+}).ParseFS(uiFiles, "ui/*.html"))
+
+// Lucide icons (lucide-static 0.468.0, ISC license): the inner SVG markup.
+var icons = map[string]string{
+	"check":          `<path d="M20 6 9 17l-5-5"/>`,
+	"chevron-down":   `<path d="m6 9 6 6 6-6"/>`,
+	"refresh-cw":     `<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`,
+	"terminal":       `<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>`,
+	"wifi-off":       `<path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/>`,
+	"copy":           `<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>`,
+	"ellipsis":       `<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`,
+	"info":           `<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>`,
+	"loader-circle":  `<path d="M21 12a9 9 0 1 1-6.219-8.56"/>`,
+	"log-in":         `<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/>`,
+	"pencil":         `<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>`,
+	"plug-zap":       `<path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/><path d="m2 22 3-3"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m18 3-4 4h6l-4 4"/>`,
+	"plus":           `<path d="M5 12h14"/><path d="M12 5v14"/>`,
+	"power":          `<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>`,
+	"shield-check":   `<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>`,
+	"trash-2":        `<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>`,
+	"triangle-alert": `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>`,
+	"upload":         `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>`,
+	"x":              `<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`,
+}
