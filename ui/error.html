@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}} · AWS VPN</title>
   {{template "style"}}
+  <style>
+    .detail { margin-top: 6px; }
+    .detail summary { cursor: pointer; width: fit-content; border-radius: 4px; }
+    .detail pre { margin: 8px 0 0; padding: 8px 10px; border-radius: calc(var(--radius) - 4px); background: var(--muted);
+      color: var(--muted-foreground); font: 12px/1.5 "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
 </head>
 <body>
 <main>
@@ -13,6 +20,7 @@
     {{icon "triangle-alert"}}
     <h2 class="alert-title">{{.Title}}</h2>
     <p class="alert-description">{{.Message}}</p>
+    {{if .Detail}}<details class="alert-description detail"><summary>Technical details</summary><pre>{{.Detail}}</pre></details>{{end}}
   </div>
   <div><a class="btn btn-outline" href="/" autofocus>Back to the dashboard</a></div>
 </main>

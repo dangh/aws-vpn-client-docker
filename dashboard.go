@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"embed"
-	"fmt"
 	"html/template"
 	"net"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 )
 
 // handler serves the dashboard (every profile) on the SAML callback port; each
@@ -20,15 +18,8 @@ import (
 func (m *manager) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { m.handleDashboard(w, nil) })
-	mux.HandleFunc("POST /{$}", func(w http.ResponseWriter, r *http.Request) {
-		p := m.active.Load()
-		if p == nil {
-			http.Error(w, "no active auth target; start a connection from the dashboard first", http.StatusServiceUnavailable)
-			return
-		}
-		p.handleSAML(w, r)
-		m.endSignIn(p)
-	})
+	mux.HandleFunc("POST /{$}", m.handleCallback)
+	mux.HandleFunc("GET /events", m.handleVersion)
 	mux.HandleFunc("POST /add", func(w http.ResponseWriter, r *http.Request) {
 		f := postedForm(r, "add")
 		m.saved(w, r, f, m.addProfile(f.Name, f.Hostname, splitDomains(f.Domains)))
@@ -38,7 +29,7 @@ func (m *manager) handler() http.Handler {
 		m.mu.Lock()
 		u := ""
 		if a := m.signingIn(); a != nil && a.p == p {
-			u = a.url
+			u = a.url // empty while the attempt is still starting
 		}
 		m.mu.Unlock()
 		if u == "" {
@@ -65,7 +56,7 @@ func (m *manager) handler() http.Handler {
 	})
 	mux.HandleFunc("POST /p/{id}/delete", func(w http.ResponseWriter, r *http.Request) {
 		if err := m.deleteProfile(r.PathValue("id")); err != nil {
-			m.fail(w, "Could not delete the profile", err.Error())
+			m.fail(w, "Could not delete the profile", err.Error(), "")
 			return
 		}
 		http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -122,40 +113,6 @@ func (m *manager) withProfile(h func(*profile, http.ResponseWriter, *http.Reques
 	}
 }
 
-// connect wraps a handler that begins an AWS sign-in (upload or reconnect). Only one
-// sign-in can be under way: its result comes back on the one callback port. The
-// handler's redirect to the identity provider marks the sign-in; its error becomes
-// the dashboard's error page.
-func (m *manager) connect(h func(*profile, http.ResponseWriter, *http.Request)) func(*profile, http.ResponseWriter, *http.Request) {
-	return func(p *profile, w http.ResponseWriter, r *http.Request) {
-		m.mu.Lock()
-		a := m.signingIn()
-		m.mu.Unlock()
-		if a != nil && a.p != p {
-			m.fail(w, "Could not connect", fmt.Sprintf("The AWS sign-in for %s is still open. Finish it, or cancel it on its card, then connect %s.", a.p.name, p.name))
-			return
-		}
-		cw := &catchWriter{ResponseWriter: w}
-		h(p, cw, r)
-		switch {
-		case cw.code >= 400:
-			m.fail(w, "Could not connect", strings.TrimSpace(cw.body.String()))
-		case cw.code == http.StatusFound:
-			m.mu.Lock()
-			m.signIn = &signIn{p: p, url: w.Header().Get("Location"), at: time.Now()}
-			m.mu.Unlock()
-		}
-	}
-}
-
-func (m *manager) endSignIn(p *profile) {
-	m.mu.Lock()
-	if m.signIn != nil && m.signIn.p == p {
-		m.signIn = nil
-	}
-	m.mu.Unlock()
-}
-
 // catchWriter passes a response through, except an error, which it keeps.
 type catchWriter struct {
 	http.ResponseWriter
@@ -205,11 +162,11 @@ func (m *manager) saved(w http.ResponseWriter, r *http.Request, f formView, err 
 
 var profilePrefix = regexp.MustCompile(`^profile "[^"]*": `)
 
-func (m *manager) fail(w http.ResponseWriter, title, msg string) {
+func (m *manager) fail(w http.ResponseWriter, title, msg, detail string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Del("X-Content-Type-Options")
 	w.WriteHeader(http.StatusBadRequest)
-	pages.ExecuteTemplate(w, "error.html", map[string]string{"Title": title, "Message": msg})
+	pages.ExecuteTemplate(w, "error.html", map[string]string{"Title": title, "Message": msg, "Detail": detail})
 }
 
 // splitDomains reads a domain list typed one per line, or separated by commas or spaces.
@@ -268,10 +225,10 @@ func (m *manager) handleDashboard(w http.ResponseWriter, posted *formView) {
 	}
 	data := struct {
 		Profiles           []profileView
-		Connected          int
+		Connected, Version int
 		Tailnet, SSH, Open string
 		Add                formView
-	}{views, connected, m.st.Tailnet, m.st.SSH, open, add}
+	}{views, connected, m.version, m.st.Tailnet, m.st.SSH, open, add}
 	m.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if posted != nil {

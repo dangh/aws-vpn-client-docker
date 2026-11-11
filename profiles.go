@@ -41,7 +41,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -169,39 +168,15 @@ type manager struct {
 	mu       sync.Mutex
 	st       state
 	profiles map[string]*profile // by id
-	active   atomic.Pointer[profile]
 	singBox  *exec.Cmd
 
 	loginMu   sync.Mutex
 	loginURLs map[string]string // tailnet login URL sing-box logged, by id
 
-	signIn *signIn // the AWS sign-in under way (m.mu)
-}
-
-// signIn is an AWS SAML sign-in the dashboard started: the browser is at the
-// identity provider, and its result comes back on the one callback port.
-type signIn struct {
-	p   *profile
-	url string
-	at  time.Time
-}
-
-// An unfinished sign-in stops blocking others after this time.
-const signInTimeout = 5 * time.Minute
-
-// signingIn returns the AWS sign-in under way, or nil. m.mu held.
-func (m *manager) signingIn() *signIn {
-	a := m.signIn
-	if a == nil || time.Since(a.at) > signInTimeout {
-		return nil
-	}
-	a.p.mu.Lock()
-	s := a.p.connStatus
-	a.p.mu.Unlock()
-	if s == "connected" || s == "connecting" {
-		return nil
-	}
-	return a
+	signIn  *signIn // the AWS sign-in under way, see signin.go (m.mu)
+	seq     int     // last sign-in attempt number (m.mu)
+	version int     // changes when an open dashboard must refresh (m.mu)
+	subs    map[chan struct{}]struct{}
 }
 
 func runProfiles(seed string) {
@@ -275,10 +250,6 @@ func (m *manager) startProfile(ps profileState) error {
 	// After the SAML login the browser is on the callback port, which serves the dashboard.
 	p := newProfile(ps.Name, filepath.Join(dataDir, ps.ID, "profile.ovpn"), filepath.Join(run, "events"), "/", hookArgs, nil)
 	p.id = ps.ID
-	p.onAuth = func() {
-		m.active.Store(p)
-		p.logf("SAML callback on :%s now goes to this profile", port)
-	}
 	if err := p.openEvents(); err != nil {
 		return err
 	}
@@ -297,9 +268,9 @@ func (m *manager) startProfile(ps profileState) error {
 func (m *manager) stopProfile(ps profileState) {
 	if p := m.profiles[ps.ID]; p != nil {
 		p.close()
-		m.active.CompareAndSwap(p, nil)
 		if m.signIn != nil && m.signIn.p == p {
 			m.signIn = nil
+			m.changed()
 		}
 		delete(m.profiles, ps.ID)
 	}
@@ -321,6 +292,7 @@ func (m *manager) apply(st *state) error {
 		return err
 	}
 	m.st = *st
+	m.changed()
 	log.Printf("profiles changed: reloading sing-box")
 	return m.singBox.Process.Signal(syscall.SIGHUP)
 }

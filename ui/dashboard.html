@@ -95,7 +95,8 @@
     .help-body > p { color: var(--muted-foreground); }
 
     /* Toast */
-    .toast { position: fixed; right: 16px; bottom: 16px; left: auto; max-width: calc(100% - 32px); display: flex; align-items: center;
+    /* A manual popover: in the top layer, so it shows above an open modal dialog too. */
+    .toast { position: fixed; inset: auto 16px 16px auto; margin: 0; max-width: calc(100% - 32px); display: flex; align-items: center;
       gap: 8px; padding: 12px 16px; background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border);
       border-radius: var(--radius); box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
       font-weight: 500; transition: opacity .2s, transform .2s, visibility .2s; }
@@ -103,11 +104,16 @@
     .toast [data-ok] { color: var(--success); }
     .toast [data-bad] { color: var(--destructive); }
     .toast[data-kind=ok] [data-bad], .toast[data-kind=bad] [data-ok] { display: none; }
-    .toast[hidden] { display: flex; visibility: hidden; opacity: 0; transform: translateY(8px); pointer-events: none; }
+    .toast:not(:popover-open) { display: none; }
+    .toast:popover-open { animation: toast-in .2s ease-out; }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
     .stale[hidden] { display: none; }
+    /* While live updates are lost, actions that change state look off (the script blocks them). */
+    [data-stale] :is(.card-action > .btn-default, .card-action > form .btn, .alert-actions form .btn, [data-connect],
+      dialog form[method=post] button:not([type=button]), #before-connect button[value=go]) { opacity: .5; cursor: not-allowed; }
   </style>
 </head>
-<body{{if .Open}} data-open="{{.Open}}"{{end}}>
+<body data-version="{{.Version}}"{{if .Open}} data-open="{{.Open}}"{{end}}>
 <main>
   <header class="page-head">
     <div>
@@ -133,7 +139,7 @@
       <p class="card-description">
         {{- if eq .Status "connected"}}Traffic to {{len .Domains}} domain{{if ne (len .Domains) 1}}s{{end}} goes through this VPN.
         {{- else if eq .Status "connecting"}}Connecting to AWS VPN…
-        {{- else if .SigningIn}}Finish the AWS sign-in in your browser.
+        {{- else if .SigningIn}}Waiting for AWS authentication.
         {{- else if .BlockedBy}}Waiting for the sign-in of {{.BlockedBy}} to finish.
         {{- else if .HasProfile}}Ready to connect with your saved VPN file.
         {{- else}}Upload an AWS VPN configuration (.ovpn) to connect.{{end -}}
@@ -143,7 +149,7 @@
           <input type="file" name="ovpn" accept=".ovpn" id="ovpn-{{.ID}}" tabindex="-1">
         </form>
         {{if .SigningIn}}
-          <a class="btn btn-default" href="/p/{{.ID}}/login">{{icon "log-in"}}Continue sign-in</a>
+          <a class="btn btn-default" href="/p/{{.ID}}/login" data-guard>{{icon "log-in"}}Continue sign-in</a>
         {{else if .Running}}
           <form method="POST" action="/p/{{.ID}}/disconnect"><button class="btn btn-outline" data-busy="Disconnecting…" data-action>{{icon "power"}}Disconnect</button></form>
         {{else if .HasProfile}}
@@ -194,7 +200,7 @@
         <dt class="top">Domains</dt>
         <dd class="badges" id="domains-{{.ID}}">
           {{- range $i, $d := .Domains}}<span class="badge badge-mono"{{if ge $i 4}} data-extra hidden{{end}}>{{$d}}</span>{{end -}}
-          {{if gt (len .Domains) 4}}<button class="btn btn-ghost more" type="button" aria-expanded="false" aria-controls="domains-{{.ID}}" data-more="Show all {{len .Domains}}">Show all {{len .Domains}}{{icon "chevron-down"}}</button>{{end}}
+          {{if gt (len .Domains) 4}}<button class="btn btn-ghost more" type="button" aria-expanded="false" aria-controls="domains-{{.ID}}" data-more="Show all {{len .Domains}}" aria-label="Show all {{len .Domains}} domains of {{.Name}}">Show all {{len .Domains}}{{icon "chevron-down"}}</button>{{end}}
         </dd>
       </dl>
     </div>
@@ -279,7 +285,8 @@
 </dialog>
 
 <template id="spinner"><span class="spin" style="display:flex">{{icon "loader-circle"}}</span></template>
-<div class="toast" role="status" aria-live="polite" hidden><span data-ok>{{icon "check"}}</span><span data-bad>{{icon "triangle-alert"}}</span><span data-text></span></div>
+<div class="toast" popover="manual" aria-hidden="true"><span data-ok>{{icon "check"}}</span><span data-bad>{{icon "triangle-alert"}}</span><span data-text></span></div>
+<div class="sr-only" role="status" aria-live="polite" id="announce"></div>
 
 <script>
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -293,10 +300,12 @@
   let toastTimer;
   function notify(text, kind = 'ok') {
     toast.querySelector('[data-text]').textContent = text;
+    document.getElementById('announce').textContent = text;
     toast.dataset.kind = kind;
-    toast.hidden = false;
+    if (toast.matches(':popover-open')) toast.hidePopover();
+    toast.showPopover(); // again: on top of a dialog opened since
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.hidden = true, kind === 'ok' ? 1800 : 4000);
+    toastTimer = setTimeout(() => toast.hidePopover(), kind === 'ok' ? 1800 : 4000);
   }
 
   // Reload when a status changed, but never under an open dialog or menu: retried when they close.
@@ -376,7 +385,7 @@
     btn.disabled = true;
   }
   $$('form[method=post]').forEach(f => f.addEventListener('submit', e => {
-    if (f.dataset.sent) return e.preventDefault();
+    if (f.dataset.sent || blocked()) return e.preventDefault();
     f.dataset.sent = '1';
     busy(e.submitter || f.trigger);
   }));
@@ -384,6 +393,7 @@
   // Connect and upload: the SSH reminder first (unless turned off), then the action.
   const before = document.getElementById('before-connect');
   function run(btn) {
+    if (blocked()) return;
     const target = document.getElementById(btn.dataset.connect);
     const visible = document.querySelector(`.card-action > [data-connect="${btn.dataset.connect}"], .card-action form [data-connect="${btn.dataset.connect}"]`);
     if (target.type === 'file') {
@@ -397,6 +407,7 @@
   $$('[data-connect]').forEach(b => b.addEventListener('click', () => {
     const menu = b.closest('[popover]');
     menu?.hidePopover();
+    if (blocked()) return;
     if (store.get('awsvpn.skipBefore')) return run(b);
     before.pending = b;
     openDialog(before, menu ? document.querySelector(`[popovertarget="${menu.id}"]`) : b);
@@ -408,12 +419,15 @@
     run(before.pending);
   });
 
+  $$('[data-guard]').forEach(a => a.addEventListener('click', e => { if (blocked()) e.preventDefault(); }));
+
   // Copy. navigator.clipboard needs a secure context, which plain http on the tailnet is not.
-  async function copy(text) {
+  async function copy(text, near) {
     try { await navigator.clipboard.writeText(text); return true; } catch {}
     const t = document.createElement('textarea');
     t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
-    document.body.append(t); t.select();
+    // Inside an open modal dialog: the rest of the page is inert there.
+    (near.closest('dialog[open]') || document.body).append(t); t.select();
     let ok = false;
     try { ok = document.execCommand('copy'); } catch {}
     t.remove();
@@ -421,7 +435,7 @@
   }
   $$('[data-copy]').forEach(b => b.addEventListener('click', async () => {
     const input = b.closest('.input-group').querySelector('input');
-    if (await copy(input.value)) { b.focus(); notify('Copied to clipboard'); }
+    if (await copy(input.value, b)) { b.focus(); notify('Copied to clipboard'); }
     else { input.focus(); input.select(); notify('Copy failed. Select the text and copy it.', 'bad'); }
   }));
   $$('[data-select]').forEach(i => i.addEventListener('focus', () => i.select()));
@@ -447,22 +461,31 @@
   // A form that was not saved comes back open, with its input and the reason.
   if (document.body.dataset.open) openDialog(document.getElementById(document.body.dataset.open));
 
-  // Live status. A lost stream says so, keeps the last known status and blocks actions until
-  // it is back; a status change reloads the page.
+  // Live status. A lost stream says so, keeps the last known status and blocks actions that
+  // change state until it is back. A VPN status or dashboard version change reloads the page.
   const stale = document.querySelector('.stale'), lost = new Set();
-  const actions = $$('[data-action]').filter(b => !b.disabled);
+  const guarded = '.card-action > .btn-default, .card-action > form .btn, .alert-actions form .btn, [data-connect], ' +
+    'dialog form[method=post] button:not([type=button]), #before-connect button[value=go]';
   function setStale() {
     stale.hidden = lost.size === 0;
-    actions.forEach(b => b.disabled = lost.size > 0);
+    document.body.toggleAttribute('data-stale', lost.size > 0);
+    $$(guarded).forEach(el => lost.size ? el.setAttribute('aria-disabled', 'true') : el.toggleAttribute('aria-disabled', false));
   }
-  addEventListener('load', () => $$('[data-profile]').forEach(card => {
-    const es = new EventSource(`/p/${card.dataset.profile}/events`);
-    es.onmessage = ({ data }) => {
-      if (lost.delete(card.dataset.profile)) setStale();
-      if (JSON.parse(data).status !== card.dataset.status) wantReload();
-    };
-    es.onerror = () => { lost.add(card.dataset.profile); setStale(); };
-  }));
+  function blocked() {
+    if (!lost.size) return false;
+    notify('Live updates lost. Try again when they are back.', 'bad');
+    return true;
+  }
+  function watch(key, url, onData) {
+    const es = new EventSource(url);
+    es.onmessage = ({ data }) => { if (lost.delete(key)) setStale(); onData(data); };
+    es.onerror = () => { lost.add(key); setStale(); };
+  }
+  addEventListener('load', () => {
+    watch('', '/events', v => { if (v !== document.body.dataset.version) wantReload(); });
+    $$('[data-profile]').forEach(card => watch(card.dataset.profile, `/p/${card.dataset.profile}/events`,
+      data => { if (JSON.parse(data).status !== card.dataset.status) wantReload(); }));
+  });
 </script>
 </body>
 </html>
