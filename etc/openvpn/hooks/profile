@@ -1,0 +1,19 @@
+#!/bin/sh
+# openvpn --up, --route-up and --route-pre-down hook of profile mode (AWSVPN_CONFIG,
+# see profiles.go). Leaves the main routing table and /etc/resolv.conf alone: only
+# sockets with this profile's mark (table $AWSVPN_TABLE) use the tunnel.
+case "$script_type" in
+up)
+	# DNS servers the VPN pushed, for the profile's DNS forwarder
+	env | sort | sed -n 's/^foreign_option_[0-9]*=dhcp-option DNS //p' > "$AWSVPN_RUN/dns.new"
+	mv "$AWSVPN_RUN/dns.new" "$AWSVPN_RUN/dns"
+	;;
+route-up)
+	ip route replace default dev "$dev" table "$AWSVPN_TABLE"
+	echo connected > "$AWSVPN_RUN/events"
+	;;
+route-pre-down)
+	echo disconnected > "$AWSVPN_RUN/events"
+	;;
+esac
+exit 0
