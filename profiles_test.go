@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, s string) string {
@@ -95,5 +97,68 @@ func TestGuard(t *testing.T) {
 		if w.Code != c.want {
 			t.Errorf("%s %s%s origin %q: %d, want %d", c.method, c.host, c.path, c.origin, w.Code, c.want)
 		}
+	}
+}
+
+func TestConnectAllowsOneSignIn(t *testing.T) {
+	corp, prod := &profile{name: "corp"}, &profile{name: "prod"}
+	m := &manager{}
+	calls := 0
+	h := m.connect(func(p *profile, w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, "https://idp.example/"+p.name, http.StatusFound)
+	})
+	try := func(p *profile) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h(p, w, httptest.NewRequest("POST", "/p/x/reconnect", nil))
+		return w
+	}
+	if w := try(corp); w.Code != http.StatusFound || m.signIn == nil || m.signIn.p != corp || m.signIn.url != "https://idp.example/corp" {
+		t.Fatalf("first sign-in: %d, %+v", w.Code, m.signIn)
+	}
+	if w := try(prod); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "still open") || calls != 1 {
+		t.Errorf("second sign-in while corp is open: %d, calls %d, want 400 and no call", w.Code, calls)
+	}
+	if w := try(corp); w.Code != http.StatusFound {
+		t.Errorf("corp again: %d, want it allowed", w.Code)
+	}
+	m.endSignIn(corp)
+	if w := try(prod); w.Code != http.StatusFound {
+		t.Errorf("prod after corp ended: %d", w.Code)
+	}
+	m.signIn.at = time.Now().Add(-signInTimeout - time.Second)
+	if w := try(corp); w.Code != http.StatusFound {
+		t.Errorf("corp after prod timed out: %d", w.Code)
+	}
+}
+
+func TestConnectShowsHandlerError(t *testing.T) {
+	m := &manager{}
+	h := m.connect(func(p *profile, w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad .ovpn file", http.StatusBadRequest)
+	})
+	w := httptest.NewRecorder()
+	h(&profile{name: "corp"}, w, httptest.NewRequest("POST", "/p/corp/upload", nil))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Header().Get("Content-Type"), "text/html") ||
+		!strings.Contains(w.Body.String(), "Could not connect") || !strings.Contains(w.Body.String(), "bad .ovpn file") || m.signIn != nil {
+		t.Errorf("got %d %q, sign-in %+v", w.Code, w.Body.String(), m.signIn)
+	}
+}
+
+func TestDashboardKeepsUnsavedForm(t *testing.T) {
+	dir := t.TempDir()
+	m := &manager{st: state{Tailnet: "example.ts.net", SSH: "root@nas", Domains: []string{".aws"},
+		Profiles: []profileState{{ID: "corp", N: 1, Name: "corp", Hostname: "corp-proxy", Domains: []string{".a", ".b", ".c", ".d", ".e"}}}},
+		profiles: map[string]*profile{"corp": {name: "corp", profilePath: filepath.Join(dir, "none")}}, loginURLs: map[string]string{}}
+	w := httptest.NewRecorder()
+	m.handleDashboard(w, &formView{Dialog: "edit-corp", Name: "corp", Hostname: "Bad Host", Domains: ".x", Error: "bad hostname"})
+	body := w.Body.String()
+	for _, want := range []string{`data-open="edit-corp"`, `value="Bad Host"`, "bad hostname", "root@nas", "Show all 5"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard lacks %q", want)
+		}
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("code %d, want 400", w.Code)
 	}
 }

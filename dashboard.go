@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"embed"
+	"fmt"
 	"html/template"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // handler serves the dashboard (every profile) on the SAML callback port; each
@@ -15,7 +19,7 @@ import (
 // result, for the profile that began auth last.
 func (m *manager) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", m.handleDashboard)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { m.handleDashboard(w, nil) })
 	mux.HandleFunc("POST /{$}", func(w http.ResponseWriter, r *http.Request) {
 		p := m.active.Load()
 		if p == nil {
@@ -23,31 +27,48 @@ func (m *manager) handler() http.Handler {
 			return
 		}
 		p.handleSAML(w, r)
+		m.endSignIn(p)
 	})
 	mux.HandleFunc("POST /add", func(w http.ResponseWriter, r *http.Request) {
-		m.done(w, r, m.addProfile(r.FormValue("name"), r.FormValue("hostname"), splitDomains(r.FormValue("domains"))))
+		f := postedForm(r, "add")
+		m.saved(w, r, f, m.addProfile(f.Name, f.Hostname, splitDomains(f.Domains)))
 	})
 	mux.HandleFunc("GET /p/{id}/events", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) { p.handleEvents(w, r) }))
 	mux.HandleFunc("GET /p/{id}/login", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		u := p.pendingAuthURL
-		p.mu.Unlock()
+		m.mu.Lock()
+		u := ""
+		if a := m.signingIn(); a != nil && a.p == p {
+			u = a.url
+		}
+		m.mu.Unlock()
+		if u == "" {
+			p.mu.Lock()
+			u = p.pendingAuthURL // an auto-reconnect
+			p.mu.Unlock()
+		}
 		if u == "" {
 			u = "/"
 		}
 		http.Redirect(w, r, u, http.StatusFound)
 	}))
-	mux.HandleFunc("POST /p/{id}/upload", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) { p.handleUpload(w, r) }))
-	mux.HandleFunc("POST /p/{id}/reconnect", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) { p.handleReconnect(w, r) }))
+	mux.HandleFunc("POST /p/{id}/upload", m.withProfile(m.connect((*profile).handleUpload)))
+	mux.HandleFunc("POST /p/{id}/reconnect", m.withProfile(m.connect((*profile).handleReconnect)))
 	mux.HandleFunc("POST /p/{id}/disconnect", m.withProfile(func(p *profile, w http.ResponseWriter, r *http.Request) {
 		p.disconnect()
-		m.done(w, r, nil)
+		m.endSignIn(p)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}))
 	mux.HandleFunc("POST /p/{id}/edit", func(w http.ResponseWriter, r *http.Request) {
-		m.done(w, r, m.updateProfile(r.PathValue("id"), r.FormValue("name"), r.FormValue("hostname"), splitDomains(r.FormValue("domains"))))
+		id := r.PathValue("id")
+		f := postedForm(r, "edit-"+id)
+		m.saved(w, r, f, m.updateProfile(id, f.Name, f.Hostname, splitDomains(f.Domains)))
 	})
 	mux.HandleFunc("POST /p/{id}/delete", func(w http.ResponseWriter, r *http.Request) {
-		m.done(w, r, m.deleteProfile(r.PathValue("id")))
+		if err := m.deleteProfile(r.PathValue("id")); err != nil {
+			m.fail(w, "Could not delete the profile", err.Error())
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 	return m.guard(mux)
 }
@@ -101,13 +122,94 @@ func (m *manager) withProfile(h func(*profile, http.ResponseWriter, *http.Reques
 	}
 }
 
-func (m *manager) done(w http.ResponseWriter, r *http.Request, err error) {
+// connect wraps a handler that begins an AWS sign-in (upload or reconnect). Only one
+// sign-in can be under way: its result comes back on the one callback port. The
+// handler's redirect to the identity provider marks the sign-in; its error becomes
+// the dashboard's error page.
+func (m *manager) connect(h func(*profile, http.ResponseWriter, *http.Request)) func(*profile, http.ResponseWriter, *http.Request) {
+	return func(p *profile, w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		a := m.signingIn()
+		m.mu.Unlock()
+		if a != nil && a.p != p {
+			m.fail(w, "Could not connect", fmt.Sprintf("The AWS sign-in for %s is still open. Finish it, or cancel it on its card, then connect %s.", a.p.name, p.name))
+			return
+		}
+		cw := &catchWriter{ResponseWriter: w}
+		h(p, cw, r)
+		switch {
+		case cw.code >= 400:
+			m.fail(w, "Could not connect", strings.TrimSpace(cw.body.String()))
+		case cw.code == http.StatusFound:
+			m.mu.Lock()
+			m.signIn = &signIn{p: p, url: w.Header().Get("Location"), at: time.Now()}
+			m.mu.Unlock()
+		}
+	}
+}
+
+func (m *manager) endSignIn(p *profile) {
+	m.mu.Lock()
+	if m.signIn != nil && m.signIn.p == p {
+		m.signIn = nil
+	}
+	m.mu.Unlock()
+}
+
+// catchWriter passes a response through, except an error, which it keeps.
+type catchWriter struct {
+	http.ResponseWriter
+	code int
+	body bytes.Buffer
+}
+
+func (c *catchWriter) WriteHeader(code int) {
+	c.code = code
+	if code < 400 {
+		c.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (c *catchWriter) Write(b []byte) (int, error) {
+	if c.code == 0 {
+		c.WriteHeader(http.StatusOK)
+	}
+	if c.code >= 400 {
+		return c.body.Write(b)
+	}
+	return c.ResponseWriter.Write(b)
+}
+
+// formView is what a profile form shows: the profile, or what was posted when it was
+// not saved.
+type formView struct {
+	Dialog, Name, Hostname, Domains, Error string
+}
+
+func postedForm(r *http.Request, dialog string) formView {
+	return formView{Dialog: dialog, Name: r.FormValue("name"), Hostname: strings.TrimSpace(r.FormValue("hostname")), Domains: r.FormValue("domains")}
+}
+
+// saved answers a profile form: back to the dashboard, or, when it was not saved, the
+// dashboard with that form open again, its input kept and the reason shown.
+func (m *manager) saved(w http.ResponseWriter, r *http.Request, f formView, err error) {
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		pages.ExecuteTemplate(w, "error.html", err.Error())
+		// The form names the profile already: drop validate's `profile "x": ` prefix.
+		msg := profilePrefix.ReplaceAllString(err.Error(), "")
+		f.Error = strings.ToUpper(msg[:1]) + msg[1:] + "."
+		m.handleDashboard(w, &f)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+var profilePrefix = regexp.MustCompile(`^profile "[^"]*": `)
+
+func (m *manager) fail(w http.ResponseWriter, title, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Del("X-Content-Type-Options")
+	w.WriteHeader(http.StatusBadRequest)
+	pages.ExecuteTemplate(w, "error.html", map[string]string{"Title": title, "Message": msg})
 }
 
 // splitDomains reads a domain list typed one per line, or separated by commas or spaces.
@@ -120,13 +222,14 @@ func splitDomains(s string) []string {
 type profileView struct {
 	ID, Name, Hostname, Host, Status, StatusText, LoginURL string
 	Domains                                                []string
-	PendingAuth, HasProfile, Running                       bool
+	HasProfile, Running, SigningIn                         bool
+	BlockedBy                                              string // another profile's sign-in is under way
+	Form                                                   formView
 }
 
-func (v profileView) DomainsText() string { return strings.Join(v.Domains, "\n") }
-
-func (m *manager) handleDashboard(w http.ResponseWriter, r *http.Request) {
+func (m *manager) handleDashboard(w http.ResponseWriter, posted *formView) {
 	m.mu.Lock()
+	a := m.signingIn()
 	var views []profileView
 	connected := 0
 	for _, ps := range m.st.Profiles {
@@ -136,24 +239,44 @@ func (m *manager) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			host += "." + m.st.Tailnet
 		}
 		v := profileView{ID: ps.ID, Name: ps.Name, Hostname: ps.Hostname, Host: host,
-			Domains: ps.Domains, LoginURL: m.loginURL(ps.ID), HasProfile: p.hasProfile()}
+			Domains: ps.Domains, LoginURL: m.loginURL(ps.ID), HasProfile: p.hasProfile(),
+			Form: formView{Dialog: "edit-" + ps.ID, Name: ps.Name, Hostname: ps.Hostname, Domains: strings.Join(ps.Domains, "\n")}}
 		p.mu.Lock()
-		v.Status, v.PendingAuth = p.connStatus, p.pendingAuthURL != ""
+		v.Status = p.connStatus
+		v.SigningIn = p.pendingAuthURL != "" || (a != nil && a.p == p)
 		v.Running = p.activeCmd != nil || v.Status == "connected" || v.Status == "connecting"
 		p.mu.Unlock()
+		if a != nil && a.p != p {
+			v.BlockedBy = a.p.name
+		}
+		if posted != nil && posted.Dialog == v.Form.Dialog {
+			v.Form = *posted
+		}
 		v.StatusText = statusMessages[v.Status]
 		if v.Status == "connected" {
 			connected++
 		}
 		views = append(views, v)
 	}
+	add := formView{Dialog: "add", Domains: strings.Join(m.st.Domains, "\n")}
+	if posted != nil && posted.Dialog == "add" {
+		add = *posted
+	}
+	open := ""
+	if posted != nil {
+		open = posted.Dialog
+	}
 	data := struct {
-		Profiles         []profileView
-		Connected        int
-		Tailnet, Domains string
-	}{views, connected, m.st.Tailnet, strings.Join(m.st.Domains, "\n")}
+		Profiles           []profileView
+		Connected          int
+		Tailnet, SSH, Open string
+		Add                formView
+	}{views, connected, m.st.Tailnet, m.st.SSH, open, add}
 	m.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if posted != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
 	pages.ExecuteTemplate(w, "dashboard.html", data)
 }
 
@@ -176,6 +299,10 @@ var pages = template.Must(template.New("").Funcs(template.FuncMap{
 // Lucide icons (lucide-static 0.468.0, ISC license): the inner SVG markup.
 var icons = map[string]string{
 	"check":          `<path d="M20 6 9 17l-5-5"/>`,
+	"chevron-down":   `<path d="m6 9 6 6 6-6"/>`,
+	"refresh-cw":     `<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`,
+	"terminal":       `<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>`,
+	"wifi-off":       `<path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/>`,
 	"copy":           `<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>`,
 	"ellipsis":       `<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`,
 	"info":           `<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>`,

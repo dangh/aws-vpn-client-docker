@@ -7,21 +7,27 @@
   {{template "style"}}
   <style>
     /* Profile card details */
-    .card-action { display: flex; align-items: center; gap: 4px; margin: 0; }
+    .card-action { display: flex; align-items: center; gap: 4px; }
     .card-action form { margin: 0; }
     .card-header { align-items: center; }
-    .rows { display: grid; grid-template-columns: 72px 1fr; gap: 14px 16px; align-items: center; }
+    .rows { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px 16px; align-items: center; margin: 0; }
     .rows > dt { color: var(--muted-foreground); font-size: 13px; }
+    .rows > dt.top { align-self: start; padding-top: 3px; }
     .rows > dd { margin: 0; min-width: 0; }
-    .rows .proxy input { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .proxy input { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
     .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .badges [data-extra][hidden] { display: none; }
+    .more { height: 22px; padding: 0 8px; gap: 4px; font-size: 12px; color: var(--muted-foreground); }
+    .more svg { width: 14px; height: 14px; transition: transform .15s; }
+    .more[aria-expanded=true] svg { transform: rotate(180deg); }
     @media (max-width: 560px) {
-      .rows { grid-template-columns: 1fr; gap: 6px; }
-      .rows > dd + dt { margin-top: 10px; }
-      .card-header { grid-template-columns: 1fr; }
+      .card-header { grid-template-columns: minmax(0, 1fr); }
       .card-action { grid-column: 1; grid-row: 3; justify-self: stretch; margin-top: 10px; }
       .card-action > form, .card-action > .btn-default { flex: 1; }
       .card-action > form .btn { width: 100%; }
+      .rows { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+      .rows > dd + dt { margin-top: 10px; }
+      .rows > dt.top { padding-top: 0; }
     }
 
     /* Dialog and AlertDialog (native <dialog>) */
@@ -31,18 +37,32 @@
     dialog.dialog[open] { display: flex; flex-direction: column; gap: 20px; animation: zoom-in .15s ease-out; }
     dialog.dialog::backdrop { background: rgb(0 0 0 / .5); animation: fade-in .15s ease-out; }
     .dialog-header { display: flex; flex-direction: column; gap: 6px; padding-right: 24px; }
-    .dialog-title { font-size: 18px; font-weight: 600; line-height: 1.2; }
+    .dialog-title { font-size: 18px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
     .dialog-description { color: var(--muted-foreground); }
-    .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap-reverse; }
+    .dialog-footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex-wrap: wrap-reverse; }
+    .dialog-footer .grow { flex: 1; }
     .dialog-close { position: absolute; top: 14px; right: 14px; opacity: .7; }
     .dialog-close:hover { opacity: 1; }
     dialog.dialog form { display: contents; }
     @keyframes zoom-in { from { opacity: 0; transform: scale(.96); } }
     @keyframes fade-in { from { opacity: 0; } }
-    @media (max-width: 560px) { .dialog-footer .btn { flex: 1; } }
+    @media (max-width: 560px) { .dialog-footer .btn { flex: 1; } dialog.dialog { padding: 20px; } }
 
-    /* DropdownMenu (popover API) */
-    .menu { position: fixed; inset: auto; margin: 0; min-width: 176px; padding: 4px; background: var(--popover);
+    /* Steps and the copyable command */
+    .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 16px; }
+    .steps > li { counter-increment: step; display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 4px 12px; }
+    .steps > li::before { content: counter(step); display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+      background: var(--muted); font-size: 12px; font-weight: 600; }
+    .steps > li > * { grid-column: 2; }
+    .steps p { color: var(--muted-foreground); }
+    .steps b { font-weight: 500; color: var(--foreground); }
+    .command { margin-top: 8px; }
+    .command input { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .check { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+    .check input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
+
+    /* Dropdown (popover API): plain buttons in Tab order */
+    .menu { position: fixed; inset: auto; margin: 0; min-width: 184px; padding: 4px; background: var(--popover);
       color: var(--popover-foreground); border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
       box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1), 0 2px 4px -2px rgb(0 0 0 / .1); }
     .menu:popover-open { display: flex; flex-direction: column; animation: zoom-in .1s ease-out; }
@@ -62,19 +82,32 @@
     .empty h2 { font-size: 16px; font-weight: 600; }
     .empty p { color: var(--muted-foreground); max-width: 360px; margin-top: 4px; }
 
-    /* Toast */
-    .toast { position: fixed; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 8px; padding: 12px 16px;
-      background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border); border-radius: var(--radius);
-      box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1); font-weight: 500;
-      transition: opacity .2s, transform .2s, visibility .2s; }
-    .toast svg { width: 16px; height: 16px; color: var(--success); }
-    .toast[hidden] { display: flex; visibility: hidden; opacity: 0; transform: translateY(8px); pointer-events: none; }
+    /* Collapsible help */
+    .help { border: 1px solid var(--border); border-radius: calc(var(--radius) + 4px); background: var(--card); }
+    .help > summary { display: flex; align-items: center; gap: 10px; padding: 14px 20px; cursor: pointer; list-style: none;
+      font-weight: 500; border-radius: inherit; }
+    .help > summary::-webkit-details-marker { display: none; }
+    .help > summary svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+    .help > summary .chev { margin-left: auto; transition: transform .15s; }
+    .help[open] > summary .chev { transform: rotate(180deg); }
+    .help > summary:hover { background: color-mix(in oklab, var(--accent) 60%, transparent); }
+    .help-body { padding: 4px 20px 20px; display: flex; flex-direction: column; gap: 16px; }
+    .help-body > p { color: var(--muted-foreground); }
 
-    .note { margin-top: 8px; }
-    .note code { white-space: nowrap; }
+    /* Toast */
+    .toast { position: fixed; right: 16px; bottom: 16px; left: auto; max-width: calc(100% - 32px); display: flex; align-items: center;
+      gap: 8px; padding: 12px 16px; background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
+      font-weight: 500; transition: opacity .2s, transform .2s, visibility .2s; }
+    .toast svg { width: 16px; height: 16px; }
+    .toast [data-ok] { color: var(--success); }
+    .toast [data-bad] { color: var(--destructive); }
+    .toast[data-kind=ok] [data-bad], .toast[data-kind=bad] [data-ok] { display: none; }
+    .toast[hidden] { display: flex; visibility: hidden; opacity: 0; transform: translateY(8px); pointer-events: none; }
+    .stale[hidden] { display: none; }
   </style>
 </head>
-<body>
+<body{{if .Open}} data-open="{{.Open}}"{{end}}>
 <main>
   <header class="page-head">
     <div>
@@ -84,94 +117,112 @@
     {{if .Profiles}}<button class="btn btn-default" type="button" data-dialog="add">{{icon "plus"}}Add profile</button>{{end}}
   </header>
 
+  <div class="alert stale" role="status" hidden>
+    {{icon "wifi-off"}}
+    <p class="alert-title">Live updates lost. Reconnecting…</p>
+    <p class="alert-description">The statuses below may be out of date. Actions come back when the dashboard reaches the VPN host again.</p>
+  </div>
+
   {{range .Profiles}}
+  {{$state := .Status}}{{if .SigningIn}}{{$state = "signing-in"}}{{end}}
   <article class="card" data-profile="{{.ID}}" data-status="{{.Status}}" aria-labelledby="title-{{.ID}}">
     <div class="card-header">
       <h2 class="card-title" id="title-{{.ID}}">{{.Name}}
-        <span class="badge" role="status"><span class="dot"></span><span data-status-text>{{.StatusText}}</span></span>
+        <span class="badge" data-state="{{$state}}"><span class="dot"></span>{{if .SigningIn}}Signing in{{else}}{{.StatusText}}{{end}}</span>
       </h2>
       <p class="card-description">
         {{- if eq .Status "connected"}}Traffic to {{len .Domains}} domain{{if ne (len .Domains) 1}}s{{end}} goes through this VPN.
-        {{- else if eq .Status "connecting"}}Starting the VPN connection.
-        {{- else if .HasProfile}}Connect uses the saved .ovpn file.
-        {{- else}}Upload the .ovpn file from the AWS VPN self-service portal to connect.{{end -}}
+        {{- else if eq .Status "connecting"}}Connecting to AWS VPN…
+        {{- else if .SigningIn}}Finish the AWS sign-in in your browser.
+        {{- else if .BlockedBy}}Waiting for the sign-in of {{.BlockedBy}} to finish.
+        {{- else if .HasProfile}}Ready to connect with your saved VPN file.
+        {{- else}}Upload an AWS VPN configuration (.ovpn) to connect.{{end -}}
       </p>
       <div class="card-action">
-      <form method="POST" action="/p/{{.ID}}/upload" enctype="multipart/form-data" hidden>
-        <input type="file" name="ovpn" accept=".ovpn" id="ovpn-{{.ID}}">
-      </form>
-      {{if .Running}}
-        <form method="POST" action="/p/{{.ID}}/disconnect"><button class="btn btn-outline">{{icon "power"}}Disconnect</button></form>
-      {{else if .HasProfile}}
-        <form method="POST" action="/p/{{.ID}}/reconnect"><button class="btn btn-default">{{icon "plug-zap"}}Connect</button></form>
-      {{else}}
-        <button class="btn btn-default" type="button" data-pick="ovpn-{{.ID}}">{{icon "upload"}}Upload .ovpn</button>
-      {{end}}
-        <button class="btn btn-ghost btn-icon" type="button" popovertarget="menu-{{.ID}}" aria-haspopup="menu" aria-label="Actions for {{.Name}}">{{icon "ellipsis"}}</button>
-        <div class="menu" id="menu-{{.ID}}" popover role="menu">
-          <button class="menu-item" type="button" role="menuitem" data-dialog="edit-{{.ID}}">{{icon "pencil"}}Edit profile</button>
-          {{if .HasProfile}}<button class="menu-item" type="button" role="menuitem" data-pick="ovpn-{{.ID}}">{{icon "upload"}}Replace .ovpn file</button>{{end}}
+        <form method="POST" action="/p/{{.ID}}/upload" enctype="multipart/form-data" hidden>
+          <input type="file" name="ovpn" accept=".ovpn" id="ovpn-{{.ID}}" tabindex="-1">
+        </form>
+        {{if .SigningIn}}
+          <a class="btn btn-default" href="/p/{{.ID}}/login">{{icon "log-in"}}Continue sign-in</a>
+        {{else if .Running}}
+          <form method="POST" action="/p/{{.ID}}/disconnect"><button class="btn btn-outline" data-busy="Disconnecting…" data-action>{{icon "power"}}Disconnect</button></form>
+        {{else if .HasProfile}}
+          <form method="POST" action="/p/{{.ID}}/reconnect" id="reconnect-{{.ID}}"><button class="btn btn-default" type="button" data-connect="reconnect-{{.ID}}" data-busy="Connecting…" data-action {{if .BlockedBy}}disabled{{end}}>{{icon "plug-zap"}}Connect</button></form>
+        {{else}}
+          <button class="btn btn-default" type="button" data-connect="ovpn-{{.ID}}" data-busy="Uploading…" data-action {{if .BlockedBy}}disabled{{end}}>{{icon "upload"}}Upload .ovpn</button>
+        {{end}}
+        <button class="btn btn-ghost btn-icon" type="button" popovertarget="menu-{{.ID}}" aria-expanded="false" aria-label="More actions for {{.Name}}" data-action>{{icon "ellipsis"}}</button>
+        <div class="menu" id="menu-{{.ID}}" popover aria-label="More actions for {{.Name}}">
+          <button class="menu-item" type="button" data-dialog="edit-{{.ID}}">{{icon "pencil"}}Edit profile</button>
+          {{if and .HasProfile (not .Running) (not .SigningIn)}}<button class="menu-item" type="button" data-connect="ovpn-{{.ID}}" {{if .BlockedBy}}disabled{{end}}>{{icon "upload"}}Connect with another .ovpn</button>{{end}}
           <div class="menu-separator" role="separator"></div>
-          <button class="menu-item destructive" type="button" role="menuitem" data-dialog="delete-{{.ID}}">{{icon "trash-2"}}Delete profile</button>
+          <button class="menu-item destructive" type="button" data-dialog="delete-{{.ID}}">{{icon "trash-2"}}Delete profile</button>
         </div>
       </div>
     </div>
 
     <div class="card-content">
+      {{if .SigningIn}}
+      <div class="alert" role="status">
+        {{icon "info"}}
+        <p class="alert-title">Finish AWS sign-in</p>
+        <p class="alert-description">Complete the sign-in in your browser. Keep the SSH tunnel open until the status shows Connected.</p>
+        <div class="alert-actions">
+          <form method="POST" action="/p/{{.ID}}/disconnect"><button class="btn btn-outline btn-sm" data-busy="Canceling…">{{icon "x"}}Cancel sign-in</button></form>
+        </div>
+      </div>
+      {{end}}
       {{if .LoginURL}}
       <div class="alert alert-warning" role="alert">
         {{icon "triangle-alert"}}
-        <p class="alert-title">Tailnet node not logged in</p>
-        <p class="alert-description">The proxy is not on the tailnet until <span class="mono">{{.Hostname}}</span> is logged in to Tailscale. Reload this page after you log in.</p>
-        <div class="alert-actions"><a class="btn btn-outline btn-sm" href="{{.LoginURL}}" target="_blank" rel="noopener">{{icon "log-in"}}Log in to Tailscale</a></div>
-      </div>
-      {{end}}
-      {{if .PendingAuth}}
-      <div class="alert" role="status">
-        {{icon "info"}}
-        <p class="alert-title">SAML login in progress</p>
-        <p class="alert-description">Finish the login in your browser. Keep the SSH tunnel to port 35001 open.</p>
-        <div class="alert-actions"><a class="btn btn-outline btn-sm" href="/p/{{.ID}}/login">{{icon "log-in"}}Continue login</a></div>
+        <p class="alert-title">Proxy needs Tailscale sign-in</p>
+        <p class="alert-description">Sign in <span class="mono">{{.Hostname}}</span> to make its proxy address available, then refresh the dashboard. The VPN works without it.</p>
+        <div class="alert-actions">
+          <a class="btn btn-outline btn-sm" href="{{.LoginURL}}" target="_blank" rel="noopener">{{icon "log-in"}}Sign in to Tailscale</a>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="location.reload()">{{icon "refresh-cw"}}Refresh</button>
+        </div>
       </div>
       {{end}}
       <dl class="rows">
         <dt>Proxy</dt>
         <dd>
           <div class="input-group proxy">
-            <input type="text" readonly value="http://{{.Host}}" aria-label="Proxy address" data-select>
-            <span class="input-group-addon"><button class="btn btn-ghost btn-xs" type="button" data-copy="http://{{.Host}}" aria-label="Copy proxy address">{{icon "copy"}}</button></span>
+            <input type="text" readonly value="http://{{.Host}}" aria-label="Proxy address of {{.Name}}" data-select>
+            <span class="input-group-addon"><button class="btn btn-ghost btn-xs" type="button" data-copy aria-label="Copy the proxy address of {{.Name}}">{{icon "copy"}}</button></span>
           </div>
         </dd>
-        <dt>Domains</dt>
-        <dd class="badges">{{range .Domains}}<span class="badge badge-mono">{{.}}</span>{{end}}</dd>
+        <dt class="top">Domains</dt>
+        <dd class="badges" id="domains-{{.ID}}">
+          {{- range $i, $d := .Domains}}<span class="badge badge-mono"{{if ge $i 4}} data-extra hidden{{end}}>{{$d}}</span>{{end -}}
+          {{if gt (len .Domains) 4}}<button class="btn btn-ghost more" type="button" aria-expanded="false" aria-controls="domains-{{.ID}}" data-more="Show all {{len .Domains}}">Show all {{len .Domains}}{{icon "chevron-down"}}</button>{{end}}
+        </dd>
       </dl>
     </div>
 
-
-    <dialog class="dialog" id="edit-{{.ID}}" aria-labelledby="edit-title-{{.ID}}">
+    <dialog class="dialog" id="edit-{{.ID}}" aria-labelledby="edit-title-{{.ID}}" aria-describedby="edit-desc-{{.ID}}">
       <form method="POST" action="/p/{{.ID}}/edit">
         <div class="dialog-header">
-          <h2 class="dialog-title" id="edit-title-{{.ID}}">Edit profile</h2>
-          <p class="dialog-description">A new hostname or domain list restarts every proxy for a few seconds. VPN sessions stay up.</p>
+          <h2 class="dialog-title" id="edit-title-{{.ID}}">Edit {{.Name}}</h2>
+          <p class="dialog-description" id="edit-desc-{{.ID}}">Changing the hostname or domains briefly restarts all proxies. VPN connections stay connected.</p>
         </div>
-        {{template "fields" dict "Name" .Name "Hostname" .Hostname "Domains" .DomainsText "Tailnet" $.Tailnet "ID" .ID}}
+        {{template "fields" dict "F" .Form "Tailnet" $.Tailnet "ID" .ID}}
         <div class="dialog-footer">
           <button class="btn btn-outline" type="button" data-close>Cancel</button>
-          <button class="btn btn-default">Save changes</button>
+          <button class="btn btn-default" data-busy="Saving…">Save changes</button>
         </div>
       </form>
       <button class="btn btn-ghost btn-xs dialog-close" type="button" data-close aria-label="Close">{{icon "x"}}</button>
     </dialog>
 
-    <dialog class="dialog" id="delete-{{.ID}}" role="alertdialog" aria-labelledby="delete-title-{{.ID}}">
+    <dialog class="dialog" id="delete-{{.ID}}" role="alertdialog" aria-labelledby="delete-title-{{.ID}}" aria-describedby="delete-desc-{{.ID}}">
       <form method="POST" action="/p/{{.ID}}/delete">
         <div class="dialog-header">
           <h2 class="dialog-title" id="delete-title-{{.ID}}">Delete {{.Name}}?</h2>
-          <p class="dialog-description">Its VPN disconnects and its data moves to <code>/data/.trash</code>. The tailnet node <span class="mono">{{.Hostname}}</span> stays in the Tailscale admin console, offline, until you remove it there.</p>
+          <p class="dialog-description" id="delete-desc-{{.ID}}">This disconnects the VPN and removes the profile from the dashboard. Its Tailscale node <span class="mono">{{.Hostname}}</span> stays in the Tailscale admin console, offline, until you remove it there.</p>
         </div>
         <div class="dialog-footer">
           <button class="btn btn-outline" type="button" data-close autofocus>Cancel</button>
-          <button class="btn btn-destructive">Delete profile</button>
+          <button class="btn btn-destructive" data-busy="Deleting…">Delete profile</button>
         </div>
       </form>
     </dialog>
@@ -187,129 +238,271 @@
   </section>
   {{end}}
 
-  <div class="alert note">
-    {{icon "info"}}
-    <p class="alert-title">Log in one profile at a time</p>
-    <p class="alert-description">AWS sends the SAML result to <code>http://127.0.0.1:35001</code> on your computer. Keep <code>ssh -N -L 35001:localhost:35001</code> to the VPN host open while you log in.</p>
-  </div>
+  <details class="help">
+    <summary>{{icon "info"}}How connecting works<span class="chev" style="display:flex">{{icon "chevron-down"}}</span></summary>
+    <div class="help-body">
+      {{template "steps" .}}
+      <p>Several VPNs can stay connected at once; only one AWS sign-in can be open at a time. A deleted profile's files move to <code>/data/.trash</code> on the VPN host.</p>
+    </div>
+  </details>
 </main>
 
-<dialog class="dialog" id="add" aria-labelledby="add-title">
+<dialog class="dialog" id="add" aria-labelledby="add-title" aria-describedby="add-desc">
   <form method="POST" action="/add">
     <div class="dialog-header">
       <h2 class="dialog-title" id="add-title">Add profile</h2>
-      <p class="dialog-description">The new tailnet node shows a Tailscale login link on its card.</p>
+      <p class="dialog-description" id="add-desc">Create a profile, then sign its proxy in to Tailscale from its card.</p>
     </div>
-    {{template "fields" dict "Name" "" "Hostname" "" "Domains" .Domains "Tailnet" .Tailnet "ID" "new"}}
+    {{template "fields" dict "F" .Add "Tailnet" .Tailnet "ID" "new"}}
     <div class="dialog-footer">
       <button class="btn btn-outline" type="button" data-close>Cancel</button>
-      <button class="btn btn-default">Add profile</button>
+      <button class="btn btn-default" data-busy="Adding…">Add profile</button>
+    </div>
+  </form>
+  <button class="btn btn-ghost btn-xs dialog-close" type="button" data-close aria-label="Close">{{icon "x"}}</button>
+</dialog>
+
+<dialog class="dialog" id="before-connect" aria-labelledby="before-title" aria-describedby="before-desc">
+  <form method="dialog">
+    <div class="dialog-header">
+      <h2 class="dialog-title" id="before-title">Before you connect</h2>
+      <p class="dialog-description" id="before-desc">AWS sends the sign-in result to port 35001 on this computer. An SSH tunnel carries it to the VPN host.</p>
+    </div>
+    {{template "steps" .}}
+    <div class="dialog-footer">
+      <label class="check grow"><input type="checkbox" data-skip> Don't show this again</label>
+      <button class="btn btn-outline" type="button" data-close>Cancel</button>
+      <button class="btn btn-default" value="go" autofocus>Continue</button>
     </div>
   </form>
   <button class="btn btn-ghost btn-xs dialog-close" type="button" data-close aria-label="Close">{{icon "x"}}</button>
 </dialog>
 
 <template id="spinner"><span class="spin" style="display:flex">{{icon "loader-circle"}}</span></template>
-<div class="toast" role="status" aria-live="polite" hidden>{{icon "check"}}<span>Copied to clipboard</span></div>
+<div class="toast" role="status" aria-live="polite" hidden><span data-ok>{{icon "check"}}</span><span data-bad>{{icon "triangle-alert"}}</span><span data-text></span></div>
 
 <script>
-  const $$ = (s, el = document) => el.querySelectorAll(s);
+  const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+  const store = {
+    get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+  };
 
-  // Dialogs: open, close on Cancel, the X or a click on the backdrop.
+  // Toast
+  const toast = document.querySelector('.toast');
+  let toastTimer;
+  function notify(text, kind = 'ok') {
+    toast.querySelector('[data-text]').textContent = text;
+    toast.dataset.kind = kind;
+    toast.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.hidden = true, kind === 'ok' ? 1800 : 4000);
+  }
+
+  // Reload when a status changed, but never under an open dialog or menu: retried when they close.
+  let reloadWanted = false, reloadTimer;
+  const busyUI = () => document.querySelector('dialog[open], .menu:popover-open');
+  function tryReload() { if (reloadWanted && !busyUI()) location.reload(); }
+  function wantReload() { reloadWanted = true; clearTimeout(reloadTimer); reloadTimer = setTimeout(tryReload, 300); }
+  // Back from the identity provider: the page may come from the back/forward cache with old state.
+  addEventListener('pageshow', e => { if (e.persisted) location.reload(); });
+
+  // Dialogs. A form dialog with changes asks before Esc or a click outside throws them away.
+  const formState = f => f ? new URLSearchParams(new FormData(f)).toString() : '';
+  function openDialog(d, opener) {
+    d.opener = opener;
+    d.showModal();
+    d.initial = formState(d.querySelector('form[method=post]'));
+  }
+  function dismiss(d) {
+    const f = d.querySelector('form[method=post]');
+    if (f && formState(f) !== d.initial && !confirm('Discard your changes?')) return;
+    d.close();
+  }
   $$('[data-dialog]').forEach(b => b.addEventListener('click', () => {
-    b.closest('[popover]')?.hidePopover();
-    document.getElementById(b.dataset.dialog).showModal();
+    const menu = b.closest('[popover]');
+    menu?.hidePopover();
+    openDialog(document.getElementById(b.dataset.dialog), menu ? document.querySelector(`[popovertarget="${menu.id}"]`) : b);
   }));
   $$('dialog').forEach(d => {
-    d.addEventListener('click', e => { if (e.target === d) d.close(); });
+    d.addEventListener('click', e => {
+      if (e.target !== d) return;
+      const r = d.getBoundingClientRect();
+      const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      if (!inside) dismiss(d);
+    });
+    d.addEventListener('cancel', e => { e.preventDefault(); dismiss(d); });
     $$('[data-close]', d).forEach(b => b.addEventListener('click', () => d.close()));
-    d.addEventListener('close', () => { d.querySelector('form')?.reset(); if (reloadWanted) location.reload(); });
+    d.addEventListener('close', () => {
+      d.querySelector('form[method=post]')?.reset();
+      $$('[data-host-preview]', d).forEach(updatePreview);
+      d.opener?.focus();
+      tryReload();
+    });
   });
 
-  // Dropdown menus: place under the trigger, right-aligned; arrow keys move between items.
+  // Menus: placed under the trigger, right-aligned, flipped up near the bottom; closed on scroll.
   $$('.menu').forEach(menu => {
     const trigger = document.querySelector(`[popovertarget="${menu.id}"]`);
     menu.addEventListener('toggle', e => {
       trigger.setAttribute('aria-expanded', e.newState === 'open');
-      if (e.newState !== 'open') return;
-      const r = trigger.getBoundingClientRect();
-      menu.style.top = `${r.bottom + 4}px`;
-      menu.style.left = `${Math.max(8, r.right - menu.offsetWidth)}px`;
-      menu.querySelector('.menu-item').focus();
-    });
-    menu.addEventListener('keydown', e => {
-      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-      e.preventDefault();
-      const items = [...$$('.menu-item', menu)];
-      const i = items.indexOf(document.activeElement) + (e.key === 'ArrowDown' ? 1 : -1);
-      items[(i + items.length) % items.length].focus();
+      if (e.newState !== 'open') {
+        const f = document.activeElement;
+        if (!f || f === document.body || menu.contains(f)) trigger.focus();
+        return tryReload();
+      }
+      const r = trigger.getBoundingClientRect(), h = menu.offsetHeight;
+      const below = r.bottom + 4 + h <= innerHeight - 8;
+      menu.style.top = `${below ? r.bottom + 4 : Math.max(8, r.top - 4 - h)}px`;
+      menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, innerWidth - 8 - menu.offsetWidth))}px`;
+      menu.querySelector('.menu-item:not(:disabled)')?.focus();
     });
   });
+  // Tab out of a menu closes it.
+  $$('.menu').forEach(menu => menu.addEventListener('focusout', e => {
+    if (e.relatedTarget && !menu.contains(e.relatedTarget)) menu.hidePopover();
+  }));
+  const closeMenus = () => $$('.menu:popover-open').forEach(m => m.hidePopover());
+  addEventListener('scroll', closeMenus, { passive: true });
+  addEventListener('resize', closeMenus);
 
-  // Busy state: a submitted form's button shows a spinner and cannot be clicked twice.
+  // Busy state: one submit per form; the button says what is happening.
   const spinner = document.getElementById('spinner').content;
   function busy(btn) {
     if (!btn) return;
-    btn.querySelector('svg')?.remove();
+    btn.querySelector(':scope > svg')?.remove();
     btn.prepend(spinner.cloneNode(true));
-    btn.setAttribute('aria-disabled', 'true');
+    if (btn.dataset.busy) btn.lastChild.textContent = btn.dataset.busy;
+    btn.disabled = true;
   }
-  $$('form').forEach(f => f.addEventListener('submit', e => busy(e.submitter)));
-
-  // .ovpn upload: the button opens the file picker; choosing a file uploads it.
-  $$('[data-pick]').forEach(b => b.addEventListener('click', () => {
-    b.closest('[popover]')?.hidePopover();
-    const input = document.getElementById(b.dataset.pick);
-    input.onchange = () => { busy(document.querySelector(`.card-action > [data-pick="${input.id}"]`)); input.form.submit(); };
-    input.click();
+  $$('form[method=post]').forEach(f => f.addEventListener('submit', e => {
+    if (f.dataset.sent) return e.preventDefault();
+    f.dataset.sent = '1';
+    busy(e.submitter || f.trigger);
   }));
 
-  // Copy the proxy address. navigator.clipboard needs a secure context (not plain http on the tailnet).
-  const toast = document.querySelector('.toast');
-  let toastTimer;
+  // Connect and upload: the SSH reminder first (unless turned off), then the action.
+  const before = document.getElementById('before-connect');
+  function run(btn) {
+    const target = document.getElementById(btn.dataset.connect);
+    const visible = document.querySelector(`.card-action > [data-connect="${btn.dataset.connect}"], .card-action form [data-connect="${btn.dataset.connect}"]`);
+    if (target.type === 'file') {
+      target.onchange = () => { if (!target.files.length) return; target.form.trigger = visible; target.form.requestSubmit(); };
+      target.click();
+    } else {
+      target.trigger = btn;
+      target.requestSubmit();
+    }
+  }
+  $$('[data-connect]').forEach(b => b.addEventListener('click', () => {
+    const menu = b.closest('[popover]');
+    menu?.hidePopover();
+    if (store.get('awsvpn.skipBefore')) return run(b);
+    before.pending = b;
+    openDialog(before, menu ? document.querySelector(`[popovertarget="${menu.id}"]`) : b);
+  }));
+  before.addEventListener('close', () => {
+    if (before.returnValue !== 'go') return;
+    before.returnValue = '';
+    if (before.querySelector('[data-skip]').checked) store.set('awsvpn.skipBefore', '1');
+    run(before.pending);
+  });
+
+  // Copy. navigator.clipboard needs a secure context, which plain http on the tailnet is not.
+  async function copy(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+    const t = document.createElement('textarea');
+    t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+    document.body.append(t); t.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    t.remove();
+    return ok;
+  }
   $$('[data-copy]').forEach(b => b.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(b.dataset.copy); }
-    catch { const t = document.createElement('textarea'); t.value = b.dataset.copy; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
-    toast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.hidden = true, 1800);
+    const input = b.closest('.input-group').querySelector('input');
+    if (await copy(input.value)) { b.focus(); notify('Copied to clipboard'); }
+    else { input.focus(); input.select(); notify('Copy failed. Select the text and copy it.', 'bad'); }
   }));
   $$('[data-select]').forEach(i => i.addEventListener('focus', () => i.select()));
 
-  // Live status. The buttons depend on the status: reload when it changes, after any open dialog closes.
-  let reloadWanted = false;
+  // Domains: show all / show fewer.
+  $$('[data-more]').forEach(b => b.addEventListener('click', () => {
+    const open = b.getAttribute('aria-expanded') !== 'true';
+    $$('[data-extra]', b.parentElement).forEach(c => c.hidden = !open);
+    b.setAttribute('aria-expanded', open);
+    b.firstChild.textContent = open ? 'Show fewer' : b.dataset.more;
+  }));
+
+  // Hostname: show the full proxy address while typing.
+  function updatePreview(el) {
+    const v = document.getElementById(el.dataset.hostPreview).value.trim();
+    el.textContent = v ? `http://${v}${el.dataset.suffix}` : '';
+  }
+  $$('[data-host-preview]').forEach(el => {
+    document.getElementById(el.dataset.hostPreview).addEventListener('input', () => updatePreview(el));
+    updatePreview(el);
+  });
+
+  // A form that was not saved comes back open, with its input and the reason.
+  if (document.body.dataset.open) openDialog(document.getElementById(document.body.dataset.open));
+
+  // Live status. A lost stream says so, keeps the last known status and blocks actions until
+  // it is back; a status change reloads the page.
+  const stale = document.querySelector('.stale'), lost = new Set();
+  const actions = $$('[data-action]').filter(b => !b.disabled);
+  function setStale() {
+    stale.hidden = lost.size === 0;
+    actions.forEach(b => b.disabled = lost.size > 0);
+  }
   addEventListener('load', () => $$('[data-profile]').forEach(card => {
-    const text = card.querySelector('[data-status-text]');
     const es = new EventSource(`/p/${card.dataset.profile}/events`);
     es.onmessage = ({ data }) => {
-      const { status, message } = JSON.parse(data);
-      text.textContent = message;
-      if (status === card.dataset.status) return;
-      card.dataset.status = status;
-      reloadWanted = true;
-      if (!document.querySelector('dialog[open]')) setTimeout(() => location.reload(), 300);
+      if (lost.delete(card.dataset.profile)) setStale();
+      if (JSON.parse(data).status !== card.dataset.status) wantReload();
     };
-    es.onerror = () => { card.dataset.status = 'error'; text.textContent = 'Not reachable'; };
+    es.onerror = () => { lost.add(card.dataset.profile); setStale(); };
   }));
 </script>
 </body>
 </html>
 
+{{define "steps"}}
+<ol class="steps">
+  <li>
+    <p><b>Open an SSH tunnel to the VPN host</b> and keep it open during the sign-in.</p>
+    <div class="input-group command">
+      <input type="text" readonly value="ssh -N -L 35001:localhost:35001 {{if .SSH}}{{.SSH}}{{else}}VPN-HOST{{end}}" aria-label="SSH tunnel command" data-select>
+      <span class="input-group-addon"><button class="btn btn-ghost btn-xs" type="button" data-copy aria-label="Copy the SSH command">{{icon "copy"}}</button></span>
+    </div>
+    {{if not .SSH}}<p>Replace <code>VPN-HOST</code> with the Docker host, as you reach it with <code>ssh</code>.</p>{{end}}
+  </li>
+  <li><p><b>Sign in to AWS</b> in the tab that opens. One sign-in at a time.</p></li>
+  <li><p><b>Come back here.</b> The card shows Connected when the VPN is up.</p></li>
+</ol>
+{{end}}
+
 {{define "fields"}}
 <div class="field-group">
+  {{if .F.Error}}
+  <div class="alert alert-destructive" role="alert">
+    {{icon "triangle-alert"}}
+    <p class="alert-title">Not saved</p>
+    <p class="alert-description">{{.F.Error}}</p>
+  </div>
+  {{end}}
   <div class="field">
     <label class="label" for="name-{{.ID}}">Name</label>
-    <input class="input" id="name-{{.ID}}" type="text" name="name" value="{{.Name}}" maxlength="40" required placeholder="Corp" autocomplete="off">
+    <input class="input" id="name-{{.ID}}" type="text" name="name" value="{{.F.Name}}" maxlength="40" required placeholder="Corp" autocomplete="off">
   </div>
   <div class="field">
     <label class="label" for="hostname-{{.ID}}">Tailnet hostname</label>
-    <div class="input-group">
-      <input id="hostname-{{.ID}}" type="text" name="hostname" value="{{.Hostname}}" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="corp-proxy" autocomplete="off" spellcheck="false" aria-describedby="hostname-desc-{{.ID}}">
-      {{if .Tailnet}}<span class="input-group-addon text mono">.{{.Tailnet}}</span>{{end}}
-    </div>
-    <p class="field-description" id="hostname-desc-{{.ID}}">Lowercase letters, digits and dashes. The proxy's address on the tailnet.</p>
+    <input class="input mono" id="hostname-{{.ID}}" type="text" name="hostname" value="{{.F.Hostname}}" required maxlength="32" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="corp-proxy" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hostname-desc-{{.ID}}">
+    <p class="field-description" id="hostname-desc-{{.ID}}">Lowercase letters, digits and dashes.{{if .Tailnet}} Proxy address: <span class="mono" data-host-preview="hostname-{{.ID}}" data-suffix=".{{.Tailnet}}"></span>{{end}}</p>
   </div>
   <div class="field">
-    <label class="label" for="domains-{{.ID}}">Domains</label>
-    <textarea class="textarea mono" id="domains-{{.ID}}" name="domains" rows="5" required spellcheck="false" aria-describedby="domains-desc-{{.ID}}">{{.Domains}}</textarea>
+    <label class="label" for="domains-{{.ID}}-input">Domains</label>
+    <textarea class="textarea mono" id="domains-{{.ID}}-input" name="domains" rows="5" required spellcheck="false" autocapitalize="off" aria-describedby="domains-desc-{{.ID}}">{{.F.Domains}}</textarea>
     <p class="field-description" id="domains-desc-{{.ID}}">One per line. <code>.example.com</code> matches every subdomain of example.com. Other traffic goes direct.</p>
   </div>
 </div>

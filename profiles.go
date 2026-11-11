@@ -64,6 +64,7 @@ func vpnMark(n int) int   { return 100 + n } // also the routing table id
 // config is the seed file (AWSVPN_CONFIG).
 type config struct {
 	Tailnet  string          `json:"tailnet"`
+	SSH      string          `json:"ssh"` // the VPN host as `ssh` takes it, for the tunnel hint
 	Domains  []string        `json:"domains"`
 	Profiles []profileConfig `json:"profiles"`
 }
@@ -77,6 +78,7 @@ type profileConfig struct {
 // state is /data/profiles.json.
 type state struct {
 	Tailnet  string         `json:"tailnet,omitempty"`
+	SSH      string         `json:"ssh,omitempty"`
 	Domains  []string       `json:"domains,omitempty"` // default for new profiles
 	Profiles []profileState `json:"profiles"`
 }
@@ -92,6 +94,7 @@ type profileState struct {
 var (
 	// DNS-label shaped: ids and host names become paths, tags and tailnet names.
 	labelRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
+	sshRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
 	domainRe = regexp.MustCompile(`^\.?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 )
 
@@ -119,7 +122,7 @@ func loadConfig(path string) (*config, error) {
 }
 
 func seedState(cfg *config) *state {
-	st := &state{Tailnet: cfg.Tailnet, Domains: cfg.Domains}
+	st := &state{Tailnet: cfg.Tailnet, SSH: cfg.SSH, Domains: cfg.Domains}
 	for i, pc := range cfg.Profiles {
 		st.Profiles = append(st.Profiles, profileState{ID: pc.Name, N: i + 1, Name: pc.Name, Hostname: pc.Hostname, Domains: pc.Domains})
 	}
@@ -130,6 +133,9 @@ func seedState(cfg *config) *state {
 func validate(st *state) error {
 	if len(st.Profiles) > maxProfiles {
 		return fmt.Errorf("at most %d profiles", maxProfiles)
+	}
+	if st.SSH != "" && !sshRe.MatchString(st.SSH) {
+		return fmt.Errorf("ssh %q: use a host name, optionally user@host", st.SSH)
 	}
 	seen := map[string]bool{}
 	for _, ps := range st.Profiles {
@@ -168,6 +174,34 @@ type manager struct {
 
 	loginMu   sync.Mutex
 	loginURLs map[string]string // tailnet login URL sing-box logged, by id
+
+	signIn *signIn // the AWS sign-in under way (m.mu)
+}
+
+// signIn is an AWS SAML sign-in the dashboard started: the browser is at the
+// identity provider, and its result comes back on the one callback port.
+type signIn struct {
+	p   *profile
+	url string
+	at  time.Time
+}
+
+// An unfinished sign-in stops blocking others after this time.
+const signInTimeout = 5 * time.Minute
+
+// signingIn returns the AWS sign-in under way, or nil. m.mu held.
+func (m *manager) signingIn() *signIn {
+	a := m.signIn
+	if a == nil || time.Since(a.at) > signInTimeout {
+		return nil
+	}
+	a.p.mu.Lock()
+	s := a.p.connStatus
+	a.p.mu.Unlock()
+	if s == "connected" || s == "connecting" {
+		return nil
+	}
+	return a
 }
 
 func runProfiles(seed string) {
@@ -264,6 +298,9 @@ func (m *manager) stopProfile(ps profileState) {
 	if p := m.profiles[ps.ID]; p != nil {
 		p.close()
 		m.active.CompareAndSwap(p, nil)
+		if m.signIn != nil && m.signIn.p == p {
+			m.signIn = nil
+		}
 		delete(m.profiles, ps.ID)
 	}
 	removeRouting(vpnMark(ps.N))

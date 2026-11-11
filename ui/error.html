@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Not saved · AWS VPN</title>
+  <title>{{.Title}} · AWS VPN</title>
   {{template "style"}}
 </head>
 <body>
@@ -11,10 +11,10 @@
   <header class="page-head"><div><h1>AWS VPN</h1></div></header>
   <div class="alert alert-destructive" role="alert">
     {{icon "triangle-alert"}}
-    <p class="alert-title">Not saved</p>
-    <p class="alert-description">{{.}}</p>
+    <h2 class="alert-title">{{.Title}}</h2>
+    <p class="alert-description">{{.Message}}</p>
   </div>
-  <div><a class="btn btn-outline" href="/" onclick="if (history.length > 1) { history.back(); return false; }">Back to the dashboard</a></div>
+  <div><a class="btn btn-outline" href="/" autofocus>Back to the dashboard</a></div>
 </main>
 </body>
 </html>
