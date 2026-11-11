@@ -24,22 +24,25 @@ ARG OPTIMIZE=false
 
 WORKDIR /opt/go-server
 
-COPY server.go ./
+COPY *.go ./
 
 RUN go mod init server \
     && if [ "$OPTIMIZE" = "true" ]; then \
          apk add --no-cache upx \
-         && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-s -w" -o server ./server.go \
+         && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-s -w" -o server . \
          && upx --best server; \
        else \
-         CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -o server ./server.go; \
+         CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -o server .; \
        fi
+
+# sing-box: proxies, DNS and tailnet nodes of profile mode (AWSVPN_CONFIG)
+FROM ghcr.io/sagernet/sing-box:v1.14.4 AS sing-box
 
 FROM alpine:3.20.3 AS container
 
 WORKDIR /opt/openvpn
 
-RUN apk add --no-cache openvpn libnl3 openssl bind-tools
+RUN apk add --no-cache openvpn libnl3 openssl bind-tools iproute2-minimal
 
 # The alpine openvpn package installs its up/down (DNS) scripts to
 # /etc/openvpn/{up,down}.sh. Move them aside so those paths stay free for user
@@ -49,6 +52,7 @@ RUN mv /etc/openvpn/up.sh /etc/openvpn/up.alpine.sh \
 
 COPY --from=ovpn-builder /opt/openvpn/install-root/ /
 COPY --from=server-builder /opt/go-server/server /usr/sbin/awsvpn
+COPY --from=sing-box /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY etc/openvpn/ /etc/openvpn/
 RUN chmod +x /etc/openvpn/hooks/*
 

@@ -49,6 +49,52 @@ Both tunnels then stay up together — use `localhost:8888` for A and
 Need only one profile? Delete the `-b` services (and the dispatcher, publishing
 `35001:35001` directly on `vpn-a`).
 
+## Profile mode: every profile in one container
+
+Set `AWSVPN_CONFIG` to a JSON file and one container runs every profile in it,
+each as its own tailnet node (embedded in [sing-box](https://sing-box.sagernet.org)):
+
+```json
+{
+  "tailnet": "example.ts.net",
+  "domains": [".amazonaws.com", ".aws"],
+  "profiles": [
+    { "name": "corp", "hostname": "corp-proxy" },
+    { "name": "prod", "hostname": "prod-proxy", "domains": [".amazonaws.com"] }
+  ]
+}
+```
+
+| Node port | What |
+| --------- | ---- |
+| 80        | HTTP proxy: the profile's `domains` (default: the top-level list; `.x` = every subdomain of x) go through its tunnel, everything else direct |
+| 8080      | the profile's web UI (plain HTTP; the tailnet encrypts it) |
+
+- The tunnels never take the default route: profile *n* uses device `tun<n>`, and only
+  its proxy's VPN traffic (firewall mark and routing table 100+*n*) enters it. While a
+  tunnel is down, its VPN domains fail instead of going direct.
+- VPN domains resolve through the DNS server the VPN pushed; everything else through
+  the container's resolver.
+- The proxy never reaches the container's loopback or link-local addresses, and its
+  direct path never reaches private networks.
+- Port 35001 takes the SAML callback for whichever profile began auth last: log in one
+  profile at a time.
+- State lives in `/data/<name>/`: `profile.ovpn` (with `SAVE_PROFILE=true`) and
+  `tailscale/` (the node key). On first start each node logs a Tailscale login URL.
+
+```sh
+docker run -d --name awsvpn --init --restart unless-stopped \
+  --cap-add NET_ADMIN --device /dev/net/tun \
+  --sysctl net.ipv4.conf.all.rp_filter=2 \
+  -p 127.0.0.1:35001:35001 \
+  -e AWSVPN_CONFIG=/config.json -e SAVE_PROFILE=true \
+  -v ./config.json:/config.json:ro -v awsvpn-data:/data \
+  ghcr.io/dangh/aws-vpn-client:master
+```
+
+`rp_filter=2` (loose) is required: replies arrive on a tunnel that the main routing
+table does not route to.
+
 ### Docker run
 
 ```sh

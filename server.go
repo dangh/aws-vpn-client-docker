@@ -39,19 +39,45 @@ var statusMessages = map[string]string{
 
 var statusEmojis = map[string]string{
 	"idle":         "\U0001F513",
-	"connecting":   "\u23F3",
+	"connecting":   "⏳",
 	"connected":    "\U0001F510",
 	"disconnected": "\U0001F513",
-	"error":        "\u26D3\uFE0F\u200D\U0001F4A5",
+	"error":        "⛓️‍\U0001F4A5",
 }
 
-// mutable VPN session state — all mutations happen on the HTTP server goroutine
 var (
+	// saveProfileEnabled persists an uploaded profile to savedProfilePath for
+	// one-click reconnect. Controlled by the SAVE_PROFILE env var (see main).
+	saveProfileEnabled bool
+	// autoReconnectEnabled re-runs auth automatically when a user visits the web UI
+	// after a dropped session. Controlled by the AUTO_RECONNECT env var (see main).
+	autoReconnectEnabled bool
+)
+
+// profile is one VPN connection with its own web UI. The single-profile modes run
+// one; profile mode (AWSVPN_CONFIG, see profiles.go) runs one per configured profile.
+type profile struct {
+	name        string
+	profilePath string   // saved profile (savedProfilePath in single-profile mode)
+	eventFifo   string   // the openvpn hooks write connected/disconnected here
+	hookArgs    []string // openvpn hook and device flags for the connected session
+	onAuth      func()   // called when SAML auth begins (routes the 35001 callback here)
+	mux         *http.ServeMux
+
+	// publicURL is where the browser is sent after the SAML callback completes.
+	// With the shared 35001 dispatcher a relative "/" would strand the user on the
+	// dispatcher; PUBLIC_PORT sets this to http://localhost:<port> so they land
+	// back on this profile's own web UI. PUBLIC_URL sets the full URL instead (wins
+	// over PUBLIC_PORT), for a UI served under its own name, e.g. a Tailscale node.
+	// Defaults to "/".
+	publicURL string
+
+	// mutable VPN session state — all mutations happen on the HTTP server goroutine
 	vpnSID         string
 	vpn            *vpnState
 	activeCmd      *exec.Cmd
-	connStatus     = "idle"
-	sseClients     = map[chan string]struct{}{}
+	connStatus     string
+	sseClients     map[chan string]struct{}
 	pendingAuthURL string
 	// wasConnected is true once the VPN has reached "connected" this run. It gates
 	// auto-reconnect so we only re-auth after a dropped session — never on a fresh
@@ -59,23 +85,45 @@ var (
 	wasConnected bool
 	// reconnecting guards the on-visit auto-reconnect path from firing concurrently.
 	reconnecting bool
-	// saveProfileEnabled persists an uploaded profile to savedProfilePath for
-	// one-click reconnect. Controlled by the SAVE_PROFILE env var (see main).
-	saveProfileEnabled bool
 	// pendingProfile holds an uploaded profile that is written to savedProfilePath
 	// only once the VPN reports "connected" — so a bad profile is never saved.
 	pendingProfile []byte
-	// autoReconnectEnabled re-runs auth automatically when a user visits the web UI
-	// after a dropped session. Controlled by the AUTO_RECONNECT env var (see main).
-	autoReconnectEnabled bool
-	// publicURL is where the browser is sent after the SAML callback completes.
-	// With the shared 35001 dispatcher a relative "/" would strand the user on the
-	// dispatcher; PUBLIC_PORT sets this to http://localhost:<port> so they land
-	// back on this profile's own web UI. PUBLIC_URL sets the full URL instead (wins
-	// over PUBLIC_PORT), for a UI served under its own name, e.g. a Tailscale node.
-	// Defaults to "/".
-	publicURL = "/"
-)
+}
+
+// legacyHookArgs are the openvpn hooks of the single-profile modes: the tunnel
+// becomes the default route and the alpine scripts rewrite /etc/resolv.conf.
+var legacyHookArgs = []string{
+	"--up", "/etc/openvpn/hooks/up",
+	"--route-up", "/etc/openvpn/hooks/route-up",
+	"--route-pre-down", "/etc/openvpn/hooks/route-pre-down",
+	"--down", "/etc/openvpn/hooks/down",
+}
+
+func newProfile(name, profilePath, fifo, publicURL string, hookArgs []string, onAuth func()) *profile {
+	p := &profile{
+		name:        name,
+		profilePath: profilePath,
+		eventFifo:   fifo,
+		hookArgs:    hookArgs,
+		onAuth:      onAuth,
+		publicURL:   publicURL,
+		connStatus:  "idle",
+		sseClients:  map[chan string]struct{}{},
+		mux:         http.NewServeMux(),
+	}
+	p.mux.HandleFunc("/events", p.handleEvents)
+	p.mux.HandleFunc("/upload", p.handleUpload)
+	p.mux.HandleFunc("/reconnect", p.handleReconnect)
+	p.mux.HandleFunc("/", p.handleRoot)
+	return p
+}
+
+func (p *profile) logf(format string, args ...any) {
+	if p.name != "" {
+		format = "[" + p.name + "] " + format
+	}
+	log.Printf(format, args...)
+}
 
 type vpnState struct {
 	confPath string
@@ -90,7 +138,7 @@ const indexHTML = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>AWS VPN</title>
+  <title>%s</title>
   <style>
     body { font-family: sans-serif; margin: 60px auto; padding: 0 16px; max-width: 560px; }
     #app { display: grid; grid-template-columns: auto 1fr; column-gap: 24px; row-gap: 20px; }
@@ -113,7 +161,7 @@ const indexHTML = `<!DOCTYPE html>
   <div id="app">
     <span id="emoji">%s</span>
     <div id="top">
-      <h2>AWS VPN</h2>
+      <h2>%s</h2>
       <div id="status" class="%s">%s</div>
     </div>
     <div id="rest">
@@ -145,8 +193,8 @@ func ssePayload(status, message string) string {
 	return "data: " + string(b)
 }
 
-func fanOut(payload string) {
-	for ch := range sseClients {
+func (p *profile) fanOut(payload string) {
+	for ch := range p.sseClients {
 		select {
 		case ch <- payload:
 		default:
@@ -154,76 +202,76 @@ func fanOut(payload string) {
 	}
 }
 
-func setConnStatus(s string) {
-	connStatus = s
+func (p *profile) setConnStatus(s string) {
+	p.connStatus = s
 	if s == "connected" {
-		wasConnected = true
-		if saveProfileEnabled && pendingProfile != nil {
-			if err := saveProfile(pendingProfile); err != nil {
-				log.Printf("save profile: %v", err)
+		p.wasConnected = true
+		if saveProfileEnabled && p.pendingProfile != nil {
+			if err := p.saveProfile(p.pendingProfile); err != nil {
+				p.logf("save profile: %v", err)
 			} else {
-				log.Printf("profile saved to %s", savedProfilePath)
+				p.logf("profile saved to %s", p.profilePath)
 			}
-			pendingProfile = nil
+			p.pendingProfile = nil
 		}
 	}
 	if s == "connected" || s == "error" {
-		pendingAuthURL = ""
+		p.pendingAuthURL = ""
 	}
 }
 
-func broadcast(s string) {
-	setConnStatus(s)
-	fanOut(ssePayload(s, statusMessages[s]))
+func (p *profile) broadcast(s string) {
+	p.setConnStatus(s)
+	p.fanOut(ssePayload(s, statusMessages[s]))
 }
 
 // loadProfile returns bytes of the profile saved from a web UI upload. ok is
 // false when none has been saved yet.
-func loadProfile() (data []byte, ok bool) {
-	if b, err := os.ReadFile(savedProfilePath); err == nil {
+func (p *profile) loadProfile() (data []byte, ok bool) {
+	if b, err := os.ReadFile(p.profilePath); err == nil {
 		return b, true
 	}
 	return nil, false
 }
 
-func hasProfile() bool {
-	_, ok := loadProfile()
+func (p *profile) hasProfile() bool {
+	_, ok := p.loadProfile()
 	return ok
 }
 
-func saveProfile(data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(savedProfilePath), 0700); err != nil {
+func (p *profile) saveProfile(data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(p.profilePath), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(savedProfilePath, data, 0600)
+	return os.WriteFile(p.profilePath, data, 0600)
 }
 
 // clearSavedProfile drops any persisted profile and pending save. Called when a new
 // upload arrives so a stale profile can't be reconnected to.
-func clearSavedProfile() {
-	pendingProfile = nil
-	if err := os.Remove(savedProfilePath); err != nil && !os.IsNotExist(err) {
-		log.Printf("clear saved profile: %v", err)
+func (p *profile) clearSavedProfile() {
+	p.pendingProfile = nil
+	if err := os.Remove(p.profilePath); err != nil && !os.IsNotExist(err) {
+		p.logf("clear saved profile: %v", err)
 	}
 }
 
 // beginReconnect re-runs SAML auth from the saved profile, exactly as clicking
 // the Reconnect button does, and returns the auth URL to redirect to.
-func beginReconnect() (string, error) {
-	data, ok := loadProfile()
+func (p *profile) beginReconnect() (string, error) {
+	data, ok := p.loadProfile()
 	if !ok {
 		return "", fmt.Errorf("no saved profile")
 	}
-	return beginAuth(data)
+	return p.beginAuth(data)
 }
 
-func listenEvents() {
-	os.Remove(eventFifo)
-	if err := syscall.Mkfifo(eventFifo, 0600); err != nil {
+func (p *profile) listenEvents() {
+	os.Remove(p.eventFifo)
+	if err := syscall.Mkfifo(p.eventFifo, 0600); err != nil {
 		log.Fatalf("mkfifo: %v", err)
 	}
 	// O_RDWR keeps the read end open so reads don't return EOF when no writer is connected
-	f, err := os.OpenFile(eventFifo, os.O_RDWR, os.ModeNamedPipe)
+	f, err := os.OpenFile(p.eventFifo, os.O_RDWR, os.ModeNamedPipe)
 	if err != nil {
 		log.Fatalf("open fifo: %v", err)
 	}
@@ -231,8 +279,8 @@ func listenEvents() {
 	for scanner.Scan() {
 		s := strings.TrimSpace(scanner.Text())
 		if s == "connected" || s == "disconnected" {
-			log.Printf("VPN status: %s", s)
-			broadcast(s)
+			p.logf("VPN status: %s", s)
+			p.broadcast(s)
 		}
 	}
 }
@@ -302,7 +350,7 @@ func processOVPN(data []byte) (*vpnState, error) {
 	}, nil
 }
 
-func getAuthURL(v *vpnState) (authURL, sid string, err error) {
+func (p *profile) getAuthURL(v *vpnState) (authURL, sid string, err error) {
 	cmd := exec.Command("/usr/sbin/openvpn",
 		"--config", v.confPath,
 		"--verb", "3",
@@ -313,11 +361,11 @@ func getAuthURL(v *vpnState) (authURL, sid string, err error) {
 	)
 	cmd.Stdin = strings.NewReader("N/A\nACS::" + port + "\n")
 
-	log.Printf("running: %s", strings.Join(cmd.Args, " "))
+	p.logf("running: %s", strings.Join(cmd.Args, " "))
 	out, runErr := cmd.CombinedOutput()
-	log.Printf("openvpn output:\n%s", out)
+	p.logf("openvpn output:\n%s", out)
 	if runErr != nil {
-		log.Printf("openvpn exit: %v", runErr)
+		p.logf("openvpn exit: %v", runErr)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
@@ -336,53 +384,52 @@ func getAuthURL(v *vpnState) (authURL, sid string, err error) {
 	return
 }
 
-func connectVPN(v *vpnState, sid, encodedSAML string) {
-	cmd := exec.Command("/usr/sbin/openvpn",
+func (p *profile) connectVPN(v *vpnState, sid, encodedSAML string) {
+	args := []string{
 		"--config", v.confPath,
 		"--verb", "3", "--auth-nocache",
 		"--mute-replay-warnings", "--mssfix", "1300",
 		"--proto", v.proto, "--remote", v.srv, v.port,
 		"--script-security", "2",
-		"--up", "/etc/openvpn/hooks/up",
-		"--route-up", "/etc/openvpn/hooks/route-up",
-		"--route-pre-down", "/etc/openvpn/hooks/route-pre-down",
-		"--down", "/etc/openvpn/hooks/down",
-		"--fast-io",
-		"--auth-user-pass", "/dev/stdin",
-	)
+	}
+	args = append(args, p.hookArgs...)
+	args = append(args, "--fast-io", "--auth-user-pass", "/dev/stdin")
+	cmd := exec.Command("/usr/sbin/openvpn", args...)
 	cmd.Stdin = strings.NewReader(fmt.Sprintf("N/A\nCRV1::%s::%s\n", sid, encodedSAML))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	activeCmd = cmd
+	p.activeCmd = cmd
 	if err := cmd.Run(); err != nil {
-		log.Printf("openvpn exited: %v", err)
+		p.logf("openvpn exited: %v", err)
 	}
-	activeCmd = nil
-	broadcast("disconnected") // fallback if route-pre-down.sh didn't fire
+	p.activeCmd = nil
+	p.broadcast("disconnected") // fallback if route-pre-down.sh didn't fire
 }
 
-func beginAuth(data []byte) (string, error) {
+func (p *profile) beginAuth(data []byte) (string, error) {
 	state, err := processOVPN(data)
 	if err != nil {
 		return "", err
 	}
-	if vpn != nil {
-		os.Remove(vpn.confPath)
+	if p.vpn != nil {
+		os.Remove(p.vpn.confPath)
 	}
-	if activeCmd != nil && activeCmd.Process != nil {
-		log.Printf("Killing existing VPN connection")
-		activeCmd.Process.Kill()
+	if p.activeCmd != nil && p.activeCmd.Process != nil {
+		p.logf("Killing existing VPN connection")
+		p.activeCmd.Process.Kill()
 	}
-	authURL, sid, err := getAuthURL(state)
+	authURL, sid, err := p.getAuthURL(state)
 	if err != nil || authURL == "" {
 		if err == nil {
 			err = fmt.Errorf("auth URL not found in openvpn output")
 		}
 		return "", err
 	}
-	vpn = state
-	vpnSID = sid
-	registerACS()
+	p.vpn = state
+	p.vpnSID = sid
+	if p.onAuth != nil {
+		p.onAuth()
+	}
 	return authURL, nil
 }
 
@@ -407,7 +454,7 @@ func registerACS() {
 	log.Printf("ACS registered with dispatcher as %s", self)
 }
 
-func handleEvents(w http.ResponseWriter, r *http.Request) {
+func (p *profile) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
@@ -418,10 +465,10 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	ch := make(chan string, 1)
-	sseClients[ch] = struct{}{}
-	defer delete(sseClients, ch)
+	p.sseClients[ch] = struct{}{}
+	defer delete(p.sseClients, ch)
 
-	fmt.Fprintf(w, "%s\n\n", ssePayload(connStatus, statusMessages[connStatus]))
+	fmt.Fprintf(w, "%s\n\n", ssePayload(p.connStatus, statusMessages[p.connStatus]))
 	flusher.Flush()
 
 	for {
@@ -435,7 +482,7 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleUpload(w http.ResponseWriter, r *http.Request) {
+func (p *profile) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
@@ -459,40 +506,40 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// A new upload supersedes any previously saved profile: drop the old file now,
 	// regardless of outcome. The new one is only persisted once it connects.
-	clearSavedProfile()
+	p.clearSavedProfile()
 
-	authURL, err := beginAuth(data)
+	authURL, err := p.beginAuth(data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if saveProfileEnabled {
-		pendingProfile = data // persisted only when the VPN reports "connected"
+		p.pendingProfile = data // persisted only when the VPN reports "connected"
 	}
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
-func handleRoot(w http.ResponseWriter, r *http.Request) {
+func (p *profile) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		// Auto-reconnect: only after a session that was connected and then dropped
 		// this run. wasConnected stays false on a fresh start or an invalid profile,
 		// so neither triggers this.
-		if autoReconnectEnabled && wasConnected && connStatus == "disconnected" && pendingAuthURL == "" && !reconnecting {
-			reconnecting = true
-			wasConnected = false
-			authURL, err := beginReconnect()
-			reconnecting = false
+		if autoReconnectEnabled && p.wasConnected && p.connStatus == "disconnected" && p.pendingAuthURL == "" && !p.reconnecting {
+			p.reconnecting = true
+			p.wasConnected = false
+			authURL, err := p.beginReconnect()
+			p.reconnecting = false
 			if err != nil {
-				log.Printf("auto-reconnect: %v", err)
+				p.logf("auto-reconnect: %v", err)
 			} else {
-				pendingAuthURL = authURL
-				log.Printf("auto-reconnect: session dropped, re-authenticating")
+				p.pendingAuthURL = authURL
+				p.logf("auto-reconnect: session dropped, re-authenticating")
 				http.Redirect(w, r, authURL, http.StatusFound)
 				return
 			}
 		}
-		if pendingAuthURL != "" {
-			http.Redirect(w, r, pendingAuthURL, http.StatusFound)
+		if p.pendingAuthURL != "" {
+			http.Redirect(w, r, p.pendingAuthURL, http.StatusFound)
 			return
 		}
 	}
@@ -507,31 +554,35 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		encoded := url.QueryEscape(samlResponse)
-		log.Printf("Received SAML response, launching VPN connection.")
+		p.logf("Received SAML response, launching VPN connection.")
 		// The auth URL is consumed — clear it so GET / doesn't bounce back to SAML
 		// (which would auto-POST again via an active IdP session and reload-loop).
-		pendingAuthURL = ""
-		if vpn != nil {
-			broadcast("connecting")
-			go connectVPN(vpn, vpnSID, encoded)
+		p.pendingAuthURL = ""
+		if p.vpn != nil {
+			p.broadcast("connecting")
+			go p.connectVPN(p.vpn, p.vpnSID, encoded)
 		}
-		http.Redirect(w, r, publicURL, http.StatusFound)
+		http.Redirect(w, r, p.publicURL, http.StatusFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html")
 	reconnectHTML := ""
-	if hasProfile() {
+	if p.hasProfile() {
 		reconnectHTML = `<form id="reconnect" method="POST" action="/reconnect"><button type="submit">Reconnect with saved profile</button></form>`
 	}
-	fmt.Fprintf(w, indexHTML, statusEmojis[connStatus], connStatus, statusMessages[connStatus], reconnectHTML)
+	title := "AWS VPN"
+	if p.name != "" {
+		title += ": " + p.name
+	}
+	fmt.Fprintf(w, indexHTML, title, statusEmojis[p.connStatus], title, p.connStatus, statusMessages[p.connStatus], reconnectHTML)
 }
 
-func handleReconnect(w http.ResponseWriter, r *http.Request) {
+func (p *profile) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
 	}
-	authURL, err := beginReconnect()
+	authURL, err := p.beginReconnect()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -614,12 +665,19 @@ func main() {
 
 	saveProfileEnabled = envEnabled("SAVE_PROFILE")
 	if saveProfileEnabled {
-		log.Printf("SAVE_PROFILE enabled: uploaded profiles persisted to %s", savedProfilePath)
+		log.Printf("SAVE_PROFILE enabled: uploaded profiles persisted")
 	}
 	autoReconnectEnabled = envEnabled("AUTO_RECONNECT")
 	if autoReconnectEnabled {
 		log.Printf("AUTO_RECONNECT enabled: re-authenticate on visit after a dropped session")
 	}
+
+	if cfg := os.Getenv("AWSVPN_CONFIG"); cfg != "" {
+		runProfiles(cfg)
+		return
+	}
+
+	publicURL := "/"
 	if u := os.Getenv("PUBLIC_URL"); u != "" {
 		publicURL = u
 		log.Printf("PUBLIC_URL set: redirecting to %s after auth", publicURL)
@@ -628,15 +686,11 @@ func main() {
 		log.Printf("PUBLIC_PORT set: redirecting to %s after auth", publicURL)
 	}
 
-	go listenEvents()
-
-	http.HandleFunc("/events", handleEvents)
-	http.HandleFunc("/upload", handleUpload)
-	http.HandleFunc("/reconnect", handleReconnect)
-	http.HandleFunc("/", handleRoot)
+	p := newProfile("", savedProfilePath, eventFifo, publicURL, legacyHookArgs, registerACS)
+	go p.listenEvents()
 
 	log.Printf("Listening at http://localhost:%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, p.mux); err != nil {
 		log.Fatal(err)
 	}
 }
