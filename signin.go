@@ -178,26 +178,54 @@ func responseTo(samlResponse string) (string, error) {
 	return rootAttr(x, "Response", "InResponseTo")
 }
 
-// rootAttr returns attribute attr of the root element, which must be elem.
+const samlProtocol = "urn:oasis:names:tc:SAML:2.0:protocol"
+
+// rootAttr returns the unqualified attribute attr of the root element, which must be
+// elem in the SAML protocol namespace. It reads the whole document: a truncated or
+// badly nested document, a second root or text outside the root is an error. This
+// checks structure for routing only; the VPN server checks the SAML trust.
 func rootAttr(x []byte, elem, attr string) (string, error) {
 	d := xml.NewDecoder(bytes.NewReader(x))
+	val, depth, roots := "", 0, 0
 	for {
 		t, err := d.Token()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			return "", fmt.Errorf("%s: %v", elem, err)
 		}
-		if se, ok := t.(xml.StartElement); ok {
-			if se.Name.Local != elem {
-				return "", fmt.Errorf("root is %s, want %s", se.Name.Local, elem)
-			}
-			for _, a := range se.Attr {
-				if a.Name.Local == attr && a.Value != "" {
-					return a.Value, nil
+		switch t := t.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if roots++; roots > 1 {
+					return "", fmt.Errorf("%s: more than one root element", elem)
+				}
+				if t.Name.Space != samlProtocol || t.Name.Local != elem {
+					return "", fmt.Errorf("root is {%s}%s, want {%s}%s", t.Name.Space, t.Name.Local, samlProtocol, elem)
+				}
+				for _, a := range t.Attr {
+					if a.Name.Space == "" && a.Name.Local == attr {
+						val = a.Value
+					}
 				}
 			}
-			return "", fmt.Errorf("%s has no %s", elem, attr)
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && len(bytes.TrimSpace(t)) > 0 {
+				return "", fmt.Errorf("%s: text outside the root element", elem)
+			}
 		}
 	}
+	switch {
+	case roots == 0 || depth != 0:
+		return "", fmt.Errorf("%s: incomplete document", elem)
+	case val == "":
+		return "", fmt.Errorf("%s has no %s", elem, attr)
+	}
+	return val, nil
 }
 
 // holdWriter keeps a handler's response: connect decides what to send.

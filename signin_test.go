@@ -15,9 +15,13 @@ import (
 // idpURL is an identity provider URL whose SAMLRequest has the given ID, like the
 // one AWS Client VPN sends (HTTP-Redirect binding).
 func idpURL(id string) string {
+	return idpURLFor(`<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="` + id + `" Version="2.0"/>`)
+}
+
+func idpURLFor(authnRequest string) string {
 	var b bytes.Buffer
 	fw, _ := flate.NewWriter(&b, flate.DefaultCompression)
-	fw.Write([]byte(`<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="` + id + `" Version="2.0"/>`))
+	fw.Write([]byte(authnRequest))
 	fw.Close()
 	return "https://idp.example/saml?SAMLRequest=" + url.QueryEscape(base64.StdEncoding.EncodeToString(b.Bytes()))
 }
@@ -91,6 +95,13 @@ func (x *harness) callback(body string) int {
 
 func form(id string) string { return "SAMLResponse=" + url.QueryEscape(samlResponse(id)) }
 
+// formXML posts an arbitrary SAMLResponse document.
+func formXML(doc string) string {
+	return "SAMLResponse=" + url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(doc)))
+}
+
+const ns = `xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"`
+
 // open checks that p's attempt with request id is still the one under way.
 func (x *harness) open(p *profile, id string) {
 	x.t.Helper()
@@ -160,8 +171,6 @@ func TestOldCallbackLeavesNewAttempt(t *testing.T) {
 
 func TestBadCallbackLeavesAttempt(t *testing.T) {
 	prod := &profile{name: "prod"}
-	x := newHarness(t)
-	x.start(prod, "B")
 	for name, body := range map[string]string{
 		"empty":       "",
 		"no response": "RelayState=x",
@@ -171,14 +180,24 @@ func TestBadCallbackLeavesAttempt(t *testing.T) {
 			[]byte(`<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="B"/>`))),
 		"no InResponseTo": "SAMLResponse=" + url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(`<Response ID="r"/>`))),
 		"other request":   form("Z"),
+		// Matching ID, broken document:
+		"truncated":        formXML(`<samlp:Response ` + ns + ` InResponseTo="B">`),
+		"mismatched close": formXML(`<samlp:Response ` + ns + ` InResponseTo="B"><a></b></samlp:Response>`),
+		"two roots":        formXML(`<samlp:Response ` + ns + ` InResponseTo="B"/><samlp:Response ` + ns + ` InResponseTo="B"/>`),
+		"no namespace":     formXML(`<Response InResponseTo="B"/>`),
+		"other namespace":  formXML(`<x:Response xmlns:x="urn:example" InResponseTo="B"/>`),
+		"text after root":  formXML(`<samlp:Response ` + ns + ` InResponseTo="B"/>junk`),
+		"prefixed attr":    formXML(`<samlp:Response ` + ns + ` xmlns:x="urn:example" x:InResponseTo="B"/>`),
 	} {
+		x := newHarness(t) // each case on its own open attempt B
+		x.start(prod, "B")
 		if c := x.callback(body); c != http.StatusBadRequest || len(x.saml) != 0 {
 			t.Errorf("%s: %d, handleSAML %v; want 400 and none", name, c, x.saml)
 		}
 		x.open(prod, "B")
-	}
-	if c := x.callback(form("B")); c != http.StatusFound || len(x.saml) != 1 {
-		t.Errorf("B's own callback after the bad ones: %d, handleSAML %v", c, x.saml)
+		if c := x.callback(form("B")); c != http.StatusFound || len(x.saml) != 1 {
+			t.Errorf("%s: B's own callback after it: %d, handleSAML %v; want 302 once", name, c, x.saml)
+		}
 	}
 }
 
@@ -231,15 +250,23 @@ func TestCallbackTakenOnce(t *testing.T) {
 	}
 }
 
-func TestStartWithoutSAMLRequestFails(t *testing.T) {
-	m := &manager{}
-	h := m.connect(func(p *profile, w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://idp.example/no-request", http.StatusFound)
-	})
-	w := httptest.NewRecorder()
-	h(&profile{name: "corp"}, w, httptest.NewRequest("POST", "/p/corp/reconnect", nil))
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "could not be read") || m.signIn != nil {
-		t.Errorf("got %d, sign-in %+v", w.Code, m.signIn)
+func TestStartWithBadSAMLRequestFails(t *testing.T) {
+	for name, loc := range map[string]string{
+		"no SAMLRequest": "https://idp.example/no-request",
+		"truncated":      idpURLFor(`<samlp:AuthnRequest ` + ns + ` ID="A">`),
+		"no namespace":   idpURLFor(`<AuthnRequest ID="A"/>`),
+		"two roots":      idpURLFor(`<samlp:AuthnRequest ` + ns + ` ID="A"/><samlp:AuthnRequest ` + ns + ` ID="A"/>`),
+		"no ID":          idpURLFor(`<samlp:AuthnRequest ` + ns + `/>`),
+	} {
+		m := &manager{}
+		h := m.connect(func(p *profile, w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, loc, http.StatusFound)
+		})
+		w := httptest.NewRecorder()
+		h(&profile{name: "corp"}, w, httptest.NewRequest("POST", "/p/corp/reconnect", nil))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "could not be read") || m.signIn != nil {
+			t.Errorf("%s: got %d, sign-in %+v; want 400 and released", name, w.Code, m.signIn)
+		}
 	}
 }
 
